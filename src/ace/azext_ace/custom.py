@@ -6,14 +6,14 @@
 from knack.util import CLIError
 
 
-def setup_ace():
-    raise CLIError('`az ace setup` is not implemented yet. It will install and validate all dependencies.')
+def setup_ace(workspace=None, source_dir=None):
+    from ._bvt import setup_bvt
+    return setup_bvt(workspace, source_dir)
 
 
-def create_ace():
-    raise CLIError(
-        '`az ace create` is not implemented yet. '
-        'It will pack the workload into the initrd and create the enclave IGVM file.')
+def create_ace(workspace=None, source_dir=None, output_dir=None):
+    from ._bvt import create_bvt
+    return create_bvt(workspace, source_dir, output_dir)
 
 
 def launch_ace():

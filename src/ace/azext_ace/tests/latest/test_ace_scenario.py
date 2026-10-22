@@ -4,6 +4,8 @@
 # --------------------------------------------------------------------------------------------
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from knack.util import CLIError
 from azure.cli.core import get_default_cli
@@ -22,8 +24,21 @@ class AceCommandTest(unittest.TestCase):
             'ace setup', 'ace create', 'ace launch', 'ace destroy'
         })
 
+    def test_command_arguments(self):
+        for command, expected in (
+                ('ace setup', {'workspace', 'source_dir'}),
+                ('ace create', {'workspace', 'source_dir', 'output_dir'})):
+            with self.subTest(command=command):
+                cli = get_default_cli()
+                cli.invocation = SimpleNamespace(data={'command_string': command})
+                loader = AceCommandsLoader(cli_ctx=cli)
+                table = loader.load_command_table([])
+                loader.load_arguments(command)
+                table[command].load_arguments()
+                self.assertEqual(set(table[command].arguments), expected)
+
     def test_placeholder_commands(self):
-        for command in ('setup', 'create', 'launch', 'destroy'):
+        for command in ('launch', 'destroy'):
             with self.subTest(command=command):
                 handler = getattr(custom, '{}_ace'.format(command))
                 with self.assertRaisesRegex(
@@ -31,6 +46,19 @@ class AceCommandTest(unittest.TestCase):
                     handler()
 
     def test_command_help(self):
-        for command in ('setup', 'create', 'launch', 'destroy'):
+        for command in ('launch', 'destroy'):
             with self.subTest(command=command):
                 self.assertIn('Not implemented yet.', helps['ace {}'.format(command)])
+        for command in ('setup', 'create'):
+            self.assertIn('BVT', helps['ace {}'.format(command)])
+            self.assertNotIn('Not implemented yet.', helps['ace {}'.format(command)])
+
+    def test_setup_dispatch(self):
+        with patch('azext_ace._bvt.setup_bvt', return_value={'status': 'ready'}) as setup:
+            self.assertEqual(custom.setup_ace('work', 'source'), {'status': 'ready'})
+        setup.assert_called_once_with('work', 'source')
+
+    def test_create_dispatch(self):
+        with patch('azext_ace._bvt.create_bvt', return_value={'status': 'created'}) as create:
+            self.assertEqual(custom.create_ace('work', 'source', 'output'), {'status': 'created'})
+        create.assert_called_once_with('work', 'source', 'output')
