@@ -6,6 +6,8 @@
 # --------------------------------------------------------------------------------------------
 
 
+"""Package the ACE extension, RPC runtime dependencies, and pinned protocol sources/type stubs."""
+
 from codecs import open
 from setuptools import setup, find_packages
 try:
@@ -32,8 +34,11 @@ CLASSIFIERS = [
     'License :: OSI Approved :: MIT License',
 ]
 
-# TODO: Add any additional SDK dependencies here
-DEPENDENCIES = []
+# Generated protobuf messages and the handwritten gRPC client use these at runtime; protoc is build-only.
+DEPENDENCIES = [
+    'grpcio>=1.62.3,<2',
+    'protobuf>=4.25.3,<6',
+]
 
 with open('README.rst', 'r', encoding='utf-8') as f:
     README = f.read()
@@ -54,5 +59,5 @@ setup(
     classifiers=CLASSIFIERS,
     packages=find_packages(),
     install_requires=DEPENDENCIES,
-    package_data={'azext_ace': ['azext_metadata.json']},
+    package_data={'azext_ace': ['azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi']},
 )

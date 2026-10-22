@@ -3,6 +3,8 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
+"""Verify Azure CLI registration, help, arguments, and delegation without launching a VM."""
+
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,8 +18,10 @@ from azext_ace._help import helps
 
 
 class AceCommandTest(unittest.TestCase):
+    """Exercise the extension loader and public command-handler boundary."""
 
     def test_command_registration(self):
+        """Keep the advertised command set stable while lifecycle implementations evolve."""
         loader = AceCommandsLoader(cli_ctx=get_default_cli())
         command_table = loader.load_command_table([])
         self.assertEqual(set(command_table), {
@@ -25,9 +29,14 @@ class AceCommandTest(unittest.TestCase):
         })
 
     def test_command_arguments(self):
-        for command, expected in (
-                ('ace setup', {'workspace', 'source_dir'}),
-                ('ace create', {'workspace', 'source_dir', 'output_dir'})):
+        """Check that only launch/destroy expose the new instance and runtime options."""
+        expected = {
+            'ace setup': set(),
+            'ace create': set(),
+            'ace launch': {'name', 'igvm', 'openvmm', 'state_dir', 'timeout', 'allow_untested_runtime'},
+            'ace destroy': {'name', 'state_dir', 'timeout'},
+        }
+        for command in ('ace setup', 'ace create', 'ace launch', 'ace destroy'):
             with self.subTest(command=command):
                 cli = get_default_cli()
                 cli.invocation = SimpleNamespace(data={'command_string': command})
@@ -35,10 +44,11 @@ class AceCommandTest(unittest.TestCase):
                 table = loader.load_command_table([])
                 loader.load_arguments(command)
                 table[command].load_arguments()
-                self.assertEqual(set(table[command].arguments), expected)
+                self.assertEqual(set(table[command].arguments), expected[command])
 
     def test_placeholder_commands(self):
-        for command in ('launch', 'destroy'):
+        """Ensure unfinished provisioning/image-building commands fail explicitly."""
+        for command in ('setup', 'create'):
             with self.subTest(command=command):
                 handler = getattr(custom, '{}_ace'.format(command))
                 with self.assertRaisesRegex(
@@ -46,19 +56,26 @@ class AceCommandTest(unittest.TestCase):
                     handler()
 
     def test_command_help(self):
-        for command in ('launch', 'destroy'):
+        """Distinguish placeholder help from the local-L1 lifecycle requirements."""
+        for command in ('setup', 'create'):
             with self.subTest(command=command):
                 self.assertIn('Not implemented yet.', helps['ace {}'.format(command)])
-        for command in ('setup', 'create'):
-            self.assertIn('BVT', helps['ace {}'.format(command)])
-            self.assertNotIn('Not implemented yet.', helps['ace {}'.format(command)])
+        for command in ('launch', 'destroy'):
+            self.assertIn('Linux L1', helps['ace {}'.format(command)])
 
-    def test_setup_dispatch(self):
-        with patch('azext_ace._bvt.setup_bvt', return_value={'status': 'ready'}) as setup:
-            self.assertEqual(custom.setup_ace('work', 'source'), {'status': 'ready'})
-        setup.assert_called_once_with('work', 'source')
+    def test_lifecycle_delegation(self):
+        """Verify CLI defaults are passed unchanged to the lifecycle implementation."""
+        with patch('azext_ace._lifecycle.launch', return_value={'status': 'running'}) as launch:
+            self.assertEqual(custom.launch_ace('demo', 'demo.igvm'), {'status': 'running'})
+            launch.assert_called_once_with(
+                'demo', 'demo.igvm', 'openvmm', '/var/lib/ace/instances', 120, False)
+        with patch('azext_ace._lifecycle.destroy', return_value={'status': 'destroyed'}) as destroy:
+            self.assertEqual(custom.destroy_ace('demo'), {'status': 'destroyed'})
+            destroy.assert_called_once_with('demo', '/var/lib/ace/instances', 30)
 
-    def test_create_dispatch(self):
-        with patch('azext_ace._bvt.create_bvt', return_value={'status': 'created'}) as create:
-            self.assertEqual(custom.create_ace('work', 'source', 'output'), {'status': 'created'})
-        create.assert_called_once_with('work', 'source', 'output')
+    def test_setup_future_removal_note(self):
+        """Preserve the existing explanation of setup's possible replacement by installation."""
+        self.assertIn('may be removed', helps['ace setup'])
+        self.assertIn('setup.py', helps['ace setup'])
+        with self.assertRaisesRegex(CLIError, 'may be removed.*setup.py'):
+            custom.setup_ace()

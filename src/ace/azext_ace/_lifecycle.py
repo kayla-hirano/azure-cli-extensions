@@ -1,0 +1,282 @@
+# --------------------------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for license information.
+# --------------------------------------------------------------------------------------------
+
+"""Coordinate local L1 launch/destroy, RPC calls, guest readiness, and failure recovery."""
+
+import hashlib
+import json
+import os
+import secrets
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import BinaryIO, Optional
+
+from knack.log import get_logger
+from knack.util import CLIError
+
+from ._instance import (DEFAULT_STATE_DIR, alive, check_private, cleanup_sockets, identity,
+                        instance_lock, instance_path, read_record, require_host, stop_owned,
+                        write_record)
+from ._rpc import VmClient, create_request
+from .rpc import vmservice_pb2 as vm
+
+logger = get_logger(__name__)
+MAX_LINE_BYTES = 4 * 1024 * 1024
+
+
+def read_line(stream: BinaryIO, connection: Optional[socket.socket] = None,
+              deadline: Optional[float] = None) -> bytes:
+    """Read one bounded relay line, enforcing a total deadline when a socket is supplied."""
+    line = bytearray()
+    while len(line) <= MAX_LINE_BYTES:
+        if connection is not None and deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CLIError('Guest response timed out.')
+            connection.settimeout(min(5, remaining))
+        chunk = stream.read(1)
+        if not chunk:
+            break
+        line.extend(chunk)
+        if chunk == b'\n':
+            break
+    if not line or not line.endswith(b'\n') or len(line) > MAX_LINE_BYTES:
+        raise CLIError('Guest relay returned a missing, oversized or unterminated response.')
+    return bytes(line)
+
+
+def probe_guest(directory: Path, deadline: float) -> None:
+    """Retry the BVT guest exchange and save an SNP-shaped response without verifying attestation."""
+    last_error = 'Guest relay has not become available.'
+    challenge = secrets.token_hex(32)
+    while time.monotonic() < deadline:
+        runtime = read_record(directory / 'runtime.json')
+        if not alive(runtime['openvmm']) or not alive(runtime['supervisor']):
+            raise CLIError('OpenVMM or its supervisor exited; inspect the instance logs.')
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(min(5, max(0.01, deadline - time.monotonic())))
+                connection.connect(str(directory / 'vsock.sock'))
+                with connection.makefile('rwb', buffering=0) as stream:
+                    # Same CONNECT handshake and JSON request as skr-bvt-client.py.
+                    stream.write(b'CONNECT 4050\n')
+                    if not read_line(stream, connection, deadline).startswith(b'OK '):
+                        raise CLIError('OpenVMM rejected the guest relay connection.')
+                    stream.write(json.dumps({
+                        'challenge': challenge, 'payload': 'hello world',
+                    }).encode('utf-8') + b'\n')
+                    response = read_line(stream, connection, deadline)
+            value = json.loads(response)
+            evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
+            report = evidence.get('report') if isinstance(evidence, dict) else None
+            if not isinstance(evidence, dict) or evidence.get('tee') != 'snp' \
+                    or not isinstance(report, str) or len(report) != 2368:
+                raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
+            try:
+                bytes.fromhex(report)
+            except ValueError as error:
+                raise CLIError('Guest SNP report is not valid hexadecimal.') from error
+            (directory / 'response.json').write_bytes(response)
+            return
+        except OSError as error:
+            last_error = str(error)
+            logger.debug('Waiting for enclave application: %s', error)
+            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+        except (ValueError, TypeError) as error:
+            raise CLIError('Invalid guest JSON response: {}'.format(error)) from error
+    raise CLIError('Guest readiness timed out: {}'.format(last_error))
+
+
+def _resolve_runtime(openvmm: str, allow_untested_runtime: bool) -> Path:
+    """Resolve the executable and require expected RPM provenance unless explicitly bypassed."""
+    selected = shutil.which(openvmm)
+    if selected is None:
+        raise CLIError('OpenVMM executable not found: {}'.format(openvmm))
+    executable = Path(selected).resolve()
+    rpm = shutil.which('rpm')
+    package = None
+    if rpm:
+        try:
+            result = subprocess.run(
+                [rpm, '-qf', '--queryformat', '%{VERSION}-%{RELEASE}', str(executable)],
+                capture_output=True, text=True, timeout=10, check=False)
+            if result.returncode == 0:
+                package = result.stdout.strip()
+                verification = subprocess.run(
+                    [rpm, '-Vf', str(executable)], capture_output=True, text=True, timeout=10, check=False)
+                if verification.returncode != 0:
+                    package = None
+        except subprocess.TimeoutExpired as error:
+            raise CLIError('Timed out verifying the OpenVMM RPM package.') from error
+    if package != '0.2.0-2.azl3':
+        if not allow_untested_runtime:
+            raise CLIError(
+                'Expected Azure Linux OpenVMM 0.2.0-2.azl3 with SNP RPC and low-ECAM patch; '
+                'found {}. Use --allow-untested-runtime only after checking equivalent support.'
+                .format(package or 'an unrecognized runtime'))
+        logger.warning('Using untested OpenVMM runtime. Verify SNP IGVM RPC and below-4-GiB ECAM support.')
+    return executable
+
+
+def _wait_runtime(directory: Path, supervisor: dict, deadline: float) -> dict:
+    """Wait for the supervisor to publish matching, live OpenVMM process ownership."""
+    while time.monotonic() < deadline:
+        if not alive(supervisor):
+            raise CLIError('OpenVMM supervisor exited; inspect supervisor.log and openvmm.log.')
+        if (directory / 'runtime.json').exists():
+            runtime = read_record(directory / 'runtime.json')
+            if runtime['supervisor'] != supervisor or not alive(runtime['openvmm']):
+                raise CLIError('Invalid or exited OpenVMM runtime.')
+            return runtime
+        time.sleep(0.1)
+    raise CLIError('Timed out starting the OpenVMM supervisor.')
+
+
+def _stop_runtime(directory: Path, state: dict) -> None:
+    """Finish owned-process cleanup after RPC shutdown or launch rollback, retaining evidence."""
+    # Recovery only: prefer TeardownVM/Quit; the worker terminates and reaps its own OpenVMM child.
+    if state.get('supervisor'):
+        deadline = time.monotonic() + 2
+        while alive(state['supervisor']) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if alive(state['supervisor']):
+            logger.warning('Stopping the owned supervisor with signals after its exit grace period.')
+        stop_owned(state['supervisor'], timeout=15)
+    if (directory / 'runtime.json').exists():
+        runtime = read_record(directory / 'runtime.json')
+        if alive(runtime['openvmm']):
+            logger.warning('Recovering the still-running owned OpenVMM process with signals.')
+        stop_owned(runtime['openvmm'])
+    cleanup_sockets(directory)
+
+
+def _file_digest(path: Path) -> str:
+    """Hash an input in bounded chunks so instance records identify the selected artifacts."""
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def launch(name: str, igvm: str, openvmm: str = 'openvmm',
+           state_dir: str = DEFAULT_STATE_DIR, timeout: float = 120,
+           allow_untested_runtime: bool = False) -> dict:
+    """Create and resume a supervised SNP instance, persisting state and rolling back failures."""
+    require_host(timeout)
+    image = Path(igvm).expanduser().resolve()
+    if not image.is_file():
+        raise CLIError('IGVM file not found: {}'.format(image))
+    device = Path('/dev/mshv')
+    if not device.exists() or not stat.S_ISCHR(device.stat().st_mode):
+        raise CLIError('L1 requires the /dev/mshv character device.')
+    executable = _resolve_runtime(openvmm, allow_untested_runtime)
+    executable_digest = _file_digest(executable)
+    image_digest = _file_digest(image)
+    directory = instance_path(state_dir, name)
+    deadline = time.monotonic() + timeout
+    with instance_lock(directory):
+        if directory.exists():
+            raise CLIError('Instance already exists. Use a new --name; existing evidence is retained.')
+        directory.mkdir(mode=0o700)
+        state = {
+            'schema': 1, 'name': name, 'status': 'starting', 'igvm': str(image),
+            'openvmm': str(executable), 'directory': str(directory),
+            'openvmm_sha256': executable_digest, 'igvm_sha256': image_digest,
+            'attestation_verified': False,
+        }
+        write_record(directory / 'instance.json', state)
+        try:
+            environment = os.environ.copy()
+            environment['PYTHONPATH'] = str(Path(__file__).resolve().parent.parent) + (
+                os.pathsep + environment['PYTHONPATH'] if environment.get('PYTHONPATH') else '')
+            with (directory / 'supervisor.log').open('ab') as log:
+                worker = subprocess.Popen(
+                    [sys.executable, '-m', 'azext_ace._worker', str(directory)],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                    env=environment, start_new_session=True, close_fds=True)
+            state['supervisor'] = identity(worker.pid)
+            if state['supervisor'] is None:
+                worker.wait(timeout=5)
+                raise CLIError('Supervisor failed to start; inspect supervisor.log.')
+            write_record(directory / 'instance.json', state)
+            _wait_runtime(directory, state['supervisor'], deadline)
+            with VmClient(directory / 'rpc.sock', deadline) as client:
+                client.ready()
+                client.call('CreateVM', create_request(image, directory, name))
+                state['status'] = 'paused'
+                write_record(directory / 'instance.json', state)
+                client.call('ResumeVM')
+            probe_guest(directory, deadline)
+            state['status'] = 'running'
+            write_record(directory / 'instance.json', state)
+            logger.warning('SNP report received; its signature, measurement and trust chain are NOT verified.')
+            return state
+        except (CLIError, OSError, ValueError, KeyError, subprocess.SubprocessError, KeyboardInterrupt) as error:
+            state['status'] = 'failed'
+            state['error'] = str(error)
+            # Quit is valid even if CreateVM timed out before we learned whether creation succeeded.
+            try:
+                if (directory / 'rpc.sock').is_socket():
+                    with VmClient(directory / 'rpc.sock', time.monotonic() + 5) as client:
+                        client.call('Quit')
+            except CLIError as cleanup_error:
+                logger.warning('RPC rollback failed; attempting owned-process recovery: %s', cleanup_error)
+            try:
+                _stop_runtime(directory, state)
+            except (CLIError, OSError) as cleanup_error:
+                state['cleanup_error'] = str(cleanup_error)
+                logger.error('Launch cleanup incomplete: %s', cleanup_error)
+            write_record(directory / 'instance.json', state)
+            raise CLIError('Launch failed: {}. Evidence retained in {}'.format(error, directory)) from error
+
+
+def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) -> dict:
+    """Reconcile an instance, tear down its VM through RPC, and preserve logs and image files."""
+    require_host(timeout)
+    directory = instance_path(state_dir, name)
+    with instance_lock(directory):
+        if not directory.exists():
+            raise CLIError('ACE instance not found: {}'.format(name))
+        check_private(directory)
+        state = read_record(directory / 'instance.json')
+        if state.get('schema') != 1 or state.get('name') != name:
+            raise CLIError('Unsupported or mismatched ACE instance record.')
+        runtime_path = directory / 'runtime.json'
+        runtime = read_record(runtime_path) if runtime_path.exists() else {}
+        server_alive = bool(runtime.get('openvmm')) and alive(runtime['openvmm'])
+        worker_alive = bool(state.get('supervisor')) and alive(state['supervisor'])
+        if server_alive and runtime['supervisor'] != state.get('supervisor'):
+            raise CLIError('Runtime ownership is inconsistent; refusing to use its endpoint.')
+        if server_alive:
+            if not worker_alive:
+                logger.warning('Supervisor exited; reconciling the verified owned OpenVMM server via RPC.')
+            if not (directory / 'rpc.sock').is_socket():
+                raise CLIError('Owned OpenVMM is alive but RPC socket is missing; destruction is unconfirmed.')
+            try:
+                with VmClient(directory / 'rpc.sock', time.monotonic() + timeout) as client:
+                    properties = client.call('PropertiesVM')
+                    if properties.state != vm.Uninitialized:
+                        client.call('TeardownVM')
+                    client.call('Quit')
+            except CLIError as error:
+                state['status'] = 'destroy-failed'
+                state['error'] = str(error)
+                write_record(directory / 'instance.json', state)
+                raise CLIError('Destroy RPC failed; instance retained for retry: {}'.format(error)) from error
+        # Also reconcile a crashed server/supervisor rather than treating a missing socket as success.
+        _stop_runtime(directory, state)
+        if (directory / 'worker-error.json').exists():
+            logger.warning('Supervisor reported an error; resources are stopped. Inspect supervisor.log.')
+        state['status'] = 'destroyed'
+        state.pop('error', None)
+        state.pop('cleanup_error', None)
+        write_record(directory / 'instance.json', state)
+        return state
