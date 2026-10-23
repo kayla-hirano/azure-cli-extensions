@@ -32,7 +32,8 @@ class AceCommandTest(unittest.TestCase):
         """Keep setup approval and lifecycle options scoped to the appropriate commands."""
         expected = {
             'ace setup': {'yes'},
-            'ace create': set(),
+            'ace create': {'dependency_bundle', 'application', 'init_script', 'workspace',
+                           'output_file', 'signing_key', 'keep_intermediates'},
             'ace launch': {'name', 'igvm', 'openvmm', 'state_dir', 'timeout', 'allow_untested_runtime'},
             'ace destroy': {'name', 'state_dir', 'timeout'},
         }
@@ -46,14 +47,11 @@ class AceCommandTest(unittest.TestCase):
                 table[command].load_arguments()
                 self.assertEqual(set(table[command].arguments), expected[command])
 
-    def test_placeholder_commands(self):
-        """Ensure unfinished image building still fails explicitly."""
-        with self.assertRaisesRegex(CLIError, '`az ace create` is not implemented yet'):
-            custom.create_ace()
-
     def test_command_help(self):
-        """Distinguish placeholder help from the local-L1 lifecycle requirements."""
-        self.assertIn('Not implemented yet.', helps['ace create'])
+        """Distinguish unprivileged image building from the local-L1 lifecycle requirements."""
+        self.assertIn('Root and Azure login are not required.', helps['ace create'])
+        self.assertIn('--output-file', helps['ace create'])
+        self.assertIn('--keep-intermediates', helps['ace create'])
         self.assertIn('Azure Linux 3.0 L1', helps['ace setup'])
         for command in ('launch', 'destroy'):
             self.assertIn('Linux L1', helps['ace {}'.format(command)])

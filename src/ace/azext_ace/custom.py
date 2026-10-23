@@ -3,9 +3,16 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-"""Expose ACE command handlers while keeping runtime lifecycle logic out of CLI registration."""
+"""Expose ACE command handlers while keeping build and lifecycle logic out of CLI registration."""
 
+from pathlib import Path
+from typing import Optional
+
+from knack.log import get_logger
 from knack.util import CLIError
+
+
+logger = get_logger(__name__)
 
 
 def setup_ace(yes: bool = False) -> dict:
@@ -17,11 +24,28 @@ def setup_ace(yes: bool = False) -> dict:
         raise CLIError('Unable to set up ACE host: {}'.format(error)) from error
 
 
-def create_ace():
-    """Report that workload packaging and IGVM generation are not implemented by this command."""
-    raise CLIError(
-        '`az ace create` is not implemented yet. '
-        'It will pack the workload into the initrd and create the enclave IGVM file.')
+def create_ace(dependency_bundle: str, application: str, workspace: str, output_file: str,
+               init_script: Optional[str] = None, signing_key: Optional[str] = None,
+               keep_intermediates: bool = False) -> dict:
+    """Compose an IGVM from trusted dependencies and an already-compiled workload."""
+    from ._image_builder import IgvmBuildError, build_igvm
+    try:
+        image = build_igvm(
+            dependency_bundle=Path(dependency_bundle),
+            application=Path(application),
+            init_script=(Path(init_script) if init_script is not None
+                         else Path(__file__).parent / 'initramfs' / 'skr-bvt-init'),
+            workspace=Path(workspace),
+            output=Path(output_file),
+            signing_key=Path(signing_key) if signing_key is not None else None,
+            debug=keep_intermediates,
+            logger=logger)
+    except IgvmBuildError as error:
+        detail = 'Unable to create ACE image: {}'.format(error)
+        if error.workspace is not None:
+            detail += '\nBuild workspace retained at: {}'.format(error.workspace)
+        raise CLIError(detail) from error
+    return {'igvm': str(image)}
 
 
 def launch_ace(name: str, igvm: str, openvmm: str = 'openvmm',

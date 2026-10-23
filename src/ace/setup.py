@@ -59,5 +59,5 @@ setup(
     classifiers=CLASSIFIERS,
     packages=find_packages(),
     install_requires=DEPENDENCIES,
-    package_data={'azext_ace': ['azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi']},
+    package_data={'azext_ace': ['azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi', 'initramfs/skr-bvt-init']},
 )

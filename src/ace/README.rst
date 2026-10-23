@@ -3,8 +3,10 @@ Azure CLI ACE Extension
 
 ``az ace`` manages local SNP enclave VMs using OpenVMM. The intended workflow
 lets you generate launch artifacts with ``az ace create`` or bring your own
-compatible IGVM. Create is not implemented yet, so testing requires an existing
-SKR BVT-compatible IGVM with a fixed VM configuration. ACE is not yet a
+compatible IGVM. Create consumes a prebuilt measured-PCIe dependency bundle
+and a static application, with a packaged guest init script or an explicit
+override. Launch requires an SKR
+BVT-compatible IGVM with a fixed VM configuration. ACE is not yet a
 general-purpose image launcher.
 
 Set up a development environment
@@ -32,7 +34,7 @@ dependencies. Then prepare the host::
 Why sudo? ACE currently requires root for setup, launch, and destroy: setup
 can install system packages, while launch/destroy manage the host's VM
 runtime, access ``/dev/mshv``, and use root-owned instance state. Developer
-bootstrap and ordinary help commands do not need sudo.
+bootstrap, image creation, and ordinary help commands do not need sudo.
 
 Always use the virtual environment's absolute ``az`` path under sudo, not
 plain ``sudo az``. This runs your checkout and dependencies as root: use
@@ -83,8 +85,8 @@ Launch
 ~~~~~~
 
 Create and resume a VM from the IGVM supplied with ``--igvm``, then wait for
-a guest response containing an SNP-shaped report. Once create is implemented,
-this can be its output or your own compatible IGVM. Run as root on L1,
+a guest response containing an SNP-shaped report. This can be create's
+output or your own compatible IGVM. Run as root on L1,
 choosing a new name for every launch. Set ``IGVM`` to your image::
 
     export IGVM="$HOME/skr-bvt/skr-bvt.igvm"
@@ -122,16 +124,66 @@ use the same value for launch and destroy. Always destroy test instances
 before running ``deactivate``: leaving the shell does not stop them, and a host
 reboot does not automatically restart them.
 
-Create (not implemented)
-~~~~~~~~~~~~~~~~~~~~~~~~
+Create
+~~~~~~
 
-``az ace create`` will package a workload and generate launch artifacts,
-including the IGVM passed to ``az ace launch --igvm``. Skip this step if you
-already have a compatible IGVM.
+Package a precompiled static x86-64 application into an IGVM using an
+existing dependency bundle. Run as your normal user on Linux L1 with GNU
+cpio and gzip installed; root and Azure login are not required. See
+`Prepare dependency bundle and application`_ below for example inputs::
 
-It currently returns a "not implemented" error. View available options with
-``az ace --help`` or ``az ace <command> --help``. The workflow is:
-bootstrap, host setup, create artifacts or supply an IGVM, launch, destroy.
+    "$ACE_VENV/bin/az" ace create \
+        --dependency-bundle "$HOME/ace-inputs/dependencies" \
+        --application "$HOME/ace-inputs/enclave_app" \
+        --workspace "$HOME/ace-build" \
+        --output-file "$HOME/images/enclave.igvm"
+
+By default the packaged init script ``skr-bvt-init`` will be used, but
+``--init-script`` parameter can be used to specify a custom init script.
+
+Only the final IGVM is published, and the result returns its path for
+``az ace launch --igvm``. The output must not exist and its filesystem
+must support hard links. Use ``--keep-intermediates`` to retain build
+files and stage logs; global ``--debug`` controls logging, not retention.
+Optional ``--signing-key`` requires OpenSSL and an unencrypted PEM ECDSA
+P-384 key. Signing failure never publishes an unsigned fallback.
+
+The extension ships direct, unmodified copies of ACC-CVM-Tooling's
+``src/ace/image_builder.py`` as ``azext_ace/_image_builder.py`` and
+``src/ace/initramfs/skr-bvt-init`` as ``azext_ace/initramfs/skr-bvt-init``
+to use as part of the create command.
+
+Prepare dependency bundle and application
+-----------------------------------------
+
+``--dependency-bundle`` is a trusted ``measured-pcie-v1`` bundle containing
+the L2 kernel, base initrd, SNP boot shim, executable ``igvmfilegen``, guest
+manifest, and artifact hashes. ``--application`` is a static x86-64 ELF
+executable, installed in the guest as ``/bin/enclave_app``.
+
+You can build both on a Linux/WSL machine with an authorized
+ACC-CVM-Tooling checkout, then copy them to L1. See the example below for guidance.
+
+Adjust the paths below. The dependency workspace and output must be new directories
+outside the source checkout; choose new names when retrying::
+
+    export TOOLING="$HOME/ACC-CVM-Tooling"
+    export WORK="$HOME/ace-input-build"
+    mkdir -p "$WORK"
+
+    bash "$TOOLING/src/ace/scripts/build-igvm-dependencies.sh" \
+        --workspace "$WORK/dependency-build-1" \
+        --output "$WORK/dependencies"
+
+    rustup target add x86_64-unknown-linux-musl
+    env -u CARGO_TARGET_DIR TARGET=x86_64-unknown-linux-musl \
+        bash "$TOOLING/src/ace/scripts/build-enclave-app.sh"
+    export APP="$TOOLING/src/ace/target/x86_64-unknown-linux-musl/release/enclave_app"
+
+    (cd "$WORK/dependencies" && sha256sum --check SHA256SUMS)
+    test -s "$APP"
+
+Once the two artifacts are created, copy them over to the L1 host for use with the ACE extension.
 
 View launch evidence
 --------------------

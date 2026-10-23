@@ -2,14 +2,30 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
-"""Register host setup and local lifecycle arguments."""
+"""Register host setup, image creation, and local lifecycle arguments."""
 
 
 def load_arguments(self, _):
-    """Attach shared lifecycle arguments and launch-only boot/runtime options to the command loader."""
+    """Attach command-specific setup, build, and lifecycle options to the command loader."""
     with self.argument_context('ace setup') as context:
         context.argument('yes', options_list=['--yes', '-y'], action='store_true',
                          help='Approve installation of the supported OpenVMM package without prompting.')
+    with self.argument_context('ace create') as context:
+        context.argument('dependency_bundle', required=True,
+                         help='Trusted measured-pcie-v1 dependency bundle directory with its artifact manifest.')
+        context.argument('application', required=True,
+                         help='Precompiled static x86-64 ELF executable to install as /bin/enclave_app.')
+        context.argument('init_script', required=False,
+                         help='LF-only guest /init override. Defaults to the packaged SKR BVT script, '
+                              'which mounts guest filesystems and starts /bin/enclave_app serve-vsock 4050.')
+        context.argument('workspace', required=True,
+                         help='Parent directory for a private build workspace; may already exist.')
+        context.argument('output_file', options_list=['--output-file'], required=True,
+                         help='Destination IGVM filename. Existing files are never overwritten.')
+        context.argument('signing_key',
+                         help='Optional unencrypted PEM ECDSA P-384 private key for SNP ID-block signing.')
+        context.argument('keep_intermediates', action='store_true',
+                         help='Retain the private build workspace and stage logs on success or failure.')
     for command in ('ace launch', 'ace destroy'):
         with self.argument_context(command) as context:
             context.argument('name', options_list=['--name', '-n'], required=True,

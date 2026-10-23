@@ -4,7 +4,7 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-"""Define ACE command help, local-L1 requirements, and launch/destroy usage examples."""
+"""Define ACE command help, image-build requirements, and local-L1 lifecycle examples."""
 
 from knack.help_files import helps  # pylint: disable=unused-import
 
@@ -12,7 +12,7 @@ from knack.help_files import helps  # pylint: disable=unused-import
 helps['ace'] = """
     type: group
     short-summary: Set up dependencies and manage enclave artifacts and virtual machines.
-    long-summary: Prepare Azure Linux L1 hosts and manage local SNP IGVM instances. Create remains unimplemented.
+    long-summary: Build SNP IGVM images from existing dependencies, prepare Azure Linux L1 hosts, and manage local instances.
 """
 
 helps['ace setup'] = """
@@ -33,8 +33,26 @@ helps['ace setup'] = """
 
 helps['ace create'] = """
     type: command
-    short-summary: Pack the workload into the initrd and create the enclave IGVM file.
-    long-summary: Not implemented yet.
+    short-summary: Package a static workload and init script into an SNP enclave IGVM.
+    long-summary: >
+        Run on Linux or WSL with GNU cpio and gzip. Root and Azure login are not required.
+        Uses a trusted measured-pcie-v1 dependency bundle and a precompiled static x86-64 application.
+        Defaults to the packaged SKR BVT init script; use --init-script to override guest startup.
+        Does not compile workloads or dependencies, install tools, or launch a VM.
+        Only the final IGVM is published; an existing output is never overwritten.
+        The development profile enables confidential debug; creation does not verify boot or attestation.
+    examples:
+      - name: Create an image using the packaged SKR BVT init script.
+        text: >
+            az ace create --dependency-bundle /opt/ace/dependencies --application /home/user/enclave_app
+            --workspace /home/user/ace-build
+            --output-file /home/user/images/enclave.igvm
+      - name: Override guest startup, sign the SNP ID block, and retain intermediate files.
+        text: >
+            az ace create --dependency-bundle /opt/ace/dependencies --application /home/user/enclave_app
+            --init-script /home/user/skr-bvt-init --workspace /home/user/ace-build
+            --output-file /home/user/images/signed.igvm --signing-key /home/user/test-id-key.pem
+            --keep-intermediates
 """
 
 helps['ace launch'] = """
