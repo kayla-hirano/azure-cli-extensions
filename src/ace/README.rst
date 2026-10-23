@@ -137,7 +137,10 @@ View launch evidence
 --------------------
 
 After successful guest readiness, launch saves the JSON response under the
-instance directory. For the example above::
+instance directory. ACE requires root-owned state directories with mode
+``0700``, including custom ``--state-dir`` locations. Your normal user cannot
+enter these directories; use sudo to read the evidence directly without
+changing directories::
 
     sudo "$ACE_VENV/bin/python" -m json.tool \
         /var/lib/ace/instances/demo-1/response.json
@@ -150,3 +153,16 @@ successful launch is not verified attestation and performs no key release.
 The same directory retains ``instance.json``, ``openvmm.log``,
 ``supervisor.log``, and ``com1.log`` for diagnosis, including after destroy.
 Use your custom state directory instead if you specified ``--state-dir``.
+
+To browse all results without sudo, copy the instance directory after a
+successful destroy, when logs have stopped changing and runtime sockets have
+been removed. Choose a destination that does not already exist::
+
+    sudo cp -a -- /var/lib/ace/instances/demo-1 "$HOME/demo-1-results"
+    sudo chown -R -- "$(id -u):$(id -g)" "$HOME/demo-1-results"
+    cd "$HOME/demo-1-results"
+    python -m json.tool response.json
+
+Keep the original ACE directory root-owned and private; do not change its
+permissions to gain access. The user-owned copy is a results archive, not a
+relocatable or resumable ACE instance.
