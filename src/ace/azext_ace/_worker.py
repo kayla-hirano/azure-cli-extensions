@@ -20,6 +20,7 @@ from ._instance import cleanup_sockets, identity, read_record, write_record
 
 def supervise(directory: Path) -> None:
     """Own the server child and serial listener, publish identities, and clean up when either stops."""
+    # The launching CLI saved configuration here; state['openvmm'] is the executable path, not a PID.
     state = read_record(directory / 'instance.json')
     stopping = False
 
@@ -32,6 +33,7 @@ def supervise(directory: Path) -> None:
     signal.signal(signal.SIGINT, request_stop)
     child = None
     try:
+        # Listen for COM1 before CreateVM connects its serial backend to this supervisor.
         with socket.socket(socket.AF_UNIX) as listener, selectors.DefaultSelector() as selector:
             listener.bind(str(directory / 'serial.sock'))
             listener.listen(1)
@@ -39,7 +41,8 @@ def supervise(directory: Path) -> None:
             selector.register(listener, selectors.EVENT_READ)
             with (directory / 'openvmm.log').open('ab', buffering=0) as host_log, \
                     (directory / 'com1.log').open('ab', buffering=0) as serial_log:
-                # Unlike the BVT shell's EXIT trap, this process survives the launching az command.
+                # Start OpenVMM's CLI in gRPC-server mode on the local Unix socket rpc.sock.
+                # The server survives the launching az command; CreateVM/ResumeVM boot the guest later.
                 child = subprocess.Popen(
                     [state['openvmm'], '--rpc', 'path={},transport=grpc'.format(directory / 'rpc.sock')],
                     stdin=subprocess.DEVNULL, stdout=host_log, stderr=subprocess.STDOUT,
@@ -47,6 +50,7 @@ def supervise(directory: Path) -> None:
                 child_identity = identity(child.pid)
                 if child_identity is None:
                     raise RuntimeError('OpenVMM exited during startup; inspect openvmm.log.')
+                # Unlike instance.json's executable path, runtime.json stores owned process identities.
                 write_record(directory / 'runtime.json', {
                     'supervisor': identity(os.getpid()),
                     'openvmm': child_identity,
@@ -54,6 +58,7 @@ def supervise(directory: Path) -> None:
                 drain_until = None
                 while not stopping:
                     if child.poll() is not None:
+                        # After Quit (or a crash), briefly drain serial output before leaving the loop.
                         if drain_until is None:
                             drain_until = time.monotonic() + 1
                         if time.monotonic() >= drain_until:
@@ -77,6 +82,7 @@ def supervise(directory: Path) -> None:
     finally:
         if child is not None:
             if child.poll() is None:
+                # Recovery for signals/errors: stop a server that did not already exit through Quit.
                 child.terminate()
                 try:
                     child.wait(timeout=10)
@@ -84,6 +90,7 @@ def supervise(directory: Path) -> None:
                     child.kill()
                     child.wait(timeout=5)
             write_record(directory / 'exit.json', {'returncode': child.returncode})
+        # Remove runtime endpoints only; keep logs and exit evidence for inspection.
         cleanup_sockets(directory)
 
 

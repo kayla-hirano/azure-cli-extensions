@@ -173,6 +173,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
            state_dir: str = DEFAULT_STATE_DIR, timeout: float = 120,
            allow_untested_runtime: bool = False) -> dict:
     """Create and resume a supervised SNP instance, persisting state and rolling back failures."""
+    # Validate the Linux L1 host, existing IGVM, and runtime before starting any processes.
     require_host(timeout)
     image = Path(igvm).expanduser().resolve()
     if not image.is_file():
@@ -183,6 +184,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
     executable = _resolve_runtime(openvmm, allow_untested_runtime)
     executable_digest = _file_digest(executable)
     image_digest = _file_digest(image)
+    # Serialize lifecycle commands and retain private configuration/evidence for this instance.
     directory = instance_path(state_dir, name)
     deadline = time.monotonic() + timeout
     with instance_lock(directory):
@@ -197,6 +199,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
         }
         write_record(directory / 'instance.json', state)
         try:
+            # The persistent worker reads instance.json and owns OpenVMM after this CLI exits.
             environment = os.environ.copy()
             environment['PYTHONPATH'] = str(Path(__file__).resolve().parent.parent) + (
                 os.pathsep + environment['PYTHONPATH'] if environment.get('PYTHONPATH') else '')
@@ -210,13 +213,16 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
                 worker.wait(timeout=5)
                 raise CLIError('Supervisor failed to start; inspect supervisor.log.')
             write_record(directory / 'instance.json', state)
+            # Process ownership must be published before waiting for the gRPC endpoint to be usable.
             _wait_runtime(directory, state['supervisor'], deadline)
             with VmClient(directory / 'rpc.sock', deadline) as client:
                 client.ready()
+                # CreateVM allocates a paused SNP guest; ResumeVM starts guest execution.
                 client.call('CreateVM', create_request(image, directory, name))
                 state['status'] = 'paused'
                 write_record(directory / 'instance.json', state)
                 client.call('ResumeVM')
+            # Closing the client channel leaves OpenVMM running. Probe the guest via vsock, not gRPC.
             probe_guest(directory, deadline)
             state['status'] = 'running'
             write_record(directory / 'instance.json', state)
@@ -225,7 +231,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
         except (CLIError, OSError, ValueError, KeyError, subprocess.SubprocessError, KeyboardInterrupt) as error:
             state['status'] = 'failed'
             state['error'] = str(error)
-            # Quit is valid even if CreateVM timed out before we learned whether creation succeeded.
+            # Roll back the server with Quit, even if a timed-out CreateVM may have succeeded.
             try:
                 if (directory / 'rpc.sock').is_socket():
                     with VmClient(directory / 'rpc.sock', time.monotonic() + 5) as client:
@@ -243,6 +249,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
 
 def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) -> dict:
     """Reconcile an instance, tear down its VM through RPC, and preserve logs and image files."""
+    # Lock and validate the saved instance before connecting to any existing runtime.
     require_host(timeout)
     directory = instance_path(state_dir, name)
     with instance_lock(directory):
@@ -252,6 +259,7 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
         state = read_record(directory / 'instance.json')
         if state.get('schema') != 1 or state.get('name') != name:
             raise CLIError('Unsupported or mismatched ACE instance record.')
+        # Match full process identities, not just PIDs, before trusting the management endpoint.
         runtime_path = directory / 'runtime.json'
         runtime = read_record(runtime_path) if runtime_path.exists() else {}
         server_alive = bool(runtime.get('openvmm')) and alive(runtime['openvmm'])
@@ -267,9 +275,12 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
                 with VmClient(directory / 'rpc.sock', time.monotonic() + timeout) as client:
                     properties = client.call('PropertiesVM')
                     if properties.state != vm.Uninitialized:
+                        # TeardownVM releases the guest's resources but does not stop the RPC server.
                         client.call('TeardownVM')
+                    # Quit requests OpenVMM process exit, ending the RPC server itself.
                     client.call('Quit')
             except CLIError as error:
+                # Preserve a retryable failure rather than forcing shutdown after unconfirmed RPC.
                 state['status'] = 'destroy-failed'
                 state['error'] = str(error)
                 write_record(directory / 'instance.json', state)
@@ -278,6 +289,7 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
         _stop_runtime(directory, state)
         if (directory / 'worker-error.json').exists():
             logger.warning('Supervisor reported an error; resources are stopped. Inspect supervisor.log.')
+        # Retain the instance directory, logs, and evidence; destruction does not delete the image.
         state['status'] = 'destroyed'
         state.pop('error', None)
         state.pop('cleanup_error', None)

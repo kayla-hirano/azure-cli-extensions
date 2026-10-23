@@ -56,6 +56,7 @@ class VmClient:
 
     def __exit__(self, *_args: object) -> None:
         """Release the channel even when an RPC or caller operation fails."""
+        # Disconnect this client only; stopping OpenVMM's RPC server requires Quit or process cleanup.
         self.channel.close()
 
     def remaining(self) -> float:
