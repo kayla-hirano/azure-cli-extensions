@@ -12,15 +12,23 @@ from knack.help_files import helps  # pylint: disable=unused-import
 helps['ace'] = """
     type: group
     short-summary: Set up dependencies and manage enclave artifacts and virtual machines.
-    long-summary: Launch and destroy local SNP IGVM instances on Linux L1. Setup and create remain placeholders.
+    long-summary: Prepare Azure Linux L1 hosts and manage local SNP IGVM instances. Create remains unimplemented.
 """
 
 helps['ace setup'] = """
     type: command
-    short-summary: Set up enclave dependencies.
+    short-summary: Validate Azure Linux 3 L1 and install the supported OpenVMM package.
     long-summary: >
-        Not implemented yet. This command may be removed in favor of extension
-        installation through setup.py. Host provisioning remains separate.
+        Run as root on Azure Linux 3.0 L1 with a compatible kernel exposing /dev/mshv.
+        Installs OpenVMM 0.2.0-2.azl3 with confirmation if absent, then verifies its RPM provenance.
+        Existing incompatible or modified installations fail verification and require manual repair.
+        Does not change kernels, add repositories, reboot, or install developer tooling.
+        Python runtime dependencies are installed with the extension through setup.py.
+    examples:
+      - name: Check host prerequisites and install OpenVMM if needed.
+        text: az ace setup
+      - name: Approve package installation without an interactive prompt.
+        text: az ace setup --yes
 """
 
 helps['ace create'] = """

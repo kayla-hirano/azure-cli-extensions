@@ -1,245 +1,141 @@
-Microsoft Azure CLI 'ace' Extension
-==========================================
+Azure CLI ACE Extension
+======================
 
-This package is for the 'ace' extension.
-i.e. 'az ace'
+``az ace`` manages local SNP enclave VMs using OpenVMM. The intended workflow
+lets you generate launch artifacts with ``az ace create`` or bring your own
+compatible IGVM. Create is not implemented yet, so testing requires an existing
+SKR BVT-compatible IGVM with a fixed VM configuration. ACE is not yet a
+general-purpose image launcher.
+
+Set up a development environment
+-------------------------------
+
+Use Azure Linux 3.0 L1 with a compatible kernel exposing ``/dev/mshv``.
+Have Python 3.12 with pip/venv, git, sudo, and a checkout containing ACE ready.
+No Azure login is required.
+
+Run the developer bootstrap as your normal user, adjusting the paths::
+
+    export ACE_REPO="$HOME/azure-cli-extensions"
+    export ACE_VENV="$HOME/.venvs/ace-dev"
+    bash "$ACE_REPO/src/ace/scripts/bootstrap-dev.sh"
+    source "$ACE_VENV/activate-ace.sh"
+
+The script creates a virtual environment, configures azdev with isolated
+Azure CLI directories, and installs ACE in editable mode with its Python
+dependencies. Then prepare the host::
+
+    sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
+        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
+        "$ACE_VENV/bin/az" ace setup
+
+Always use the virtual environment's absolute ``az`` path under sudo, not
+plain ``sudo az``. This runs your checkout and dependencies as root: use
+trusted code in directories not writable by untrusted users.
+
+Why separate setup? Bootstrap installs developer tooling before ACE can run;
+``setup.py`` installs Python runtime dependencies with the extension.
+``az ace setup`` handles privileged host dependencies, not its own installation.
+Keeping them separate avoids changing your Python environment as root.
+
+Resume testing
+--------------
+
+In a new terminal or SSH session, restore the same paths and activate the
+existing environment; no bootstrap or package installation is needed::
+
+    export ACE_VENV="$HOME/.venvs/ace-dev"
+    source "$ACE_VENV/activate-ace.sh"
+    export IGVM="$HOME/skr-bvt/skr-bvt.igvm"
+
+Source edits take effect on the next CLI invocation. If dependencies or
+packaging metadata change, stop managed instances before rerunning bootstrap.
+Do not remove or update their environment/checkout while they are running.
+Existing environments created without the bootstrap need one bootstrap run
+to generate ``activate-ace.sh``.
 
 Commands
 --------
 
-* ``az ace setup``: Set up enclave dependencies (placeholder).
-* ``az ace create``: Pack the workload into the initrd and create the enclave IGVM file (placeholder).
-* ``az ace launch``: Create and resume a local SNP IGVM VM through OpenVMM gRPC.
-* ``az ace destroy``: Tear down the VM, quit its OpenVMM server and clean up owned sockets.
+Setup
+~~~~~
 
-Launch and destroy are an initial Linux-L1 implementation for the existing
-SKR BVT image, not a general image launcher. They preserve its 160 MB memory,
-one processor, Linux-direct SNP boot, measured PCIe topology, and guest port
-4050. Setup and create remain unimplemented.
+Validate Azure Linux 3.0 and ``/dev/mshv``, install
+``openvmm-0.2.0-2.azl3`` if absent, and verify its RPM version and integrity::
 
-Prerequisites
--------------
+    sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
+        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
+        "$ACE_VENV/bin/az" ace setup
 
-Run locally as root on the same Linux L1 where the CLI-based SKR BVT passed.
-The extension must be installed in the Azure CLI environment used by root.
-The existing IGVM, compatible L1 kernel and ``/dev/mshv`` must be available.
-Host provisioning and image generation are not performed by this extension.
+Setup prompts before installation; use ``--yes`` for unattended approval.
+It is safe to repeat when the expected runtime is installed. Existing
+incompatible or modified runtimes fail verification and need manual repair.
+Setup uses configured repositories only; it does not change kernels, add
+repositories, reboot, or install Python/git. It does not prove a successful
+SNP boot or verified attestation.
 
-The expected package is Azure Linux ``openvmm-0.2.0-2.azl3``. Its public
-``3.0-dev`` package recipe builds upstream OpenVMM 0.2.0 (which includes
-SNP/IGVM RPC support) and applies the low-ECAM patch for isolated guests.
-Launch checks package ownership and RPM verification. This is a provenance
-check, not proof of successful confidential launch.
+Launch
+~~~~~~
 
-For a custom build, ``--allow-untested-runtime`` explicitly bypasses that
-package check. First verify equivalent SNP IGVM RPC support and below-4-GiB
-ECAM placement. Unpatched upstream 0.2.0/main snapshots inspected for these
-notes do not select low ECAM in RPC. This switch does not fix that mismatch.
+Create and resume a VM from the IGVM supplied with ``--igvm``, then wait for
+a guest response containing an SNP-shaped report. Once create is implemented,
+this can be its output or your own compatible IGVM. Run as root on L1,
+choosing a new name for every launch. Set ``IGVM`` to your image::
 
-Development setup with azdev and sudo
-------------------------------------
-
-Use one dedicated Python environment for azdev, Azure CLI, ACE, and its
-dependencies. Run setup as your normal user; invoke that environment's
-``az`` by absolute path under sudo. Plain ``sudo az`` may select the
-distribution CLI instead, which has different dependencies and configuration.
-There is no need for a separate ``sudo azdev extension add``.
-
-These commands assume Python 3.12 with pip/venv support, git, sudo, and an
-existing checkout containing this ACE implementation on L1. Adjust ``ACE_REPO``
-and ``IGVM`` to your paths. Do not clone a stock checkout that lacks ACE::
-
-    export ACE_REPO="$HOME/azure-cli-extensions"
-    export ACE_VENV="$HOME/.venvs/ace-dev"
     export IGVM="$HOME/skr-bvt/skr-bvt.igvm"
-
-    test -f "$ACE_REPO/src/ace/setup.py"
-    test -f "$IGVM"
-    python3.12 -m venv "$ACE_VENV"
-    source "$ACE_VENV/bin/activate"
-    python -m pip install azdev
-
-Use dedicated development configuration and extension directories, avoiding
-your normal Azure credentials/configuration and root's default extension
-directory. Keep these exports in each shell used for this workflow::
-
-    export AZURE_CONFIG_DIR="$ACE_VENV/azure-config"
-    export AZURE_EXTENSION_DIR="$ACE_VENV/extensions"
-    mkdir -p "$AZURE_CONFIG_DIR" "$AZURE_EXTENSION_DIR"
-    chmod 700 "$AZURE_CONFIG_DIR" "$AZURE_EXTENSION_DIR"
-
-    azdev setup --cli pypi --repo "$ACE_REPO"
-    azdev extension add ace
-
-Ensure the dependencies declared by ACE's ``setup.py`` are installed in that
-same environment. The explicit editable install also refreshes dependencies
-after ``setup.py`` changes; it does not install into the system Python::
-
-    python -m pip install --no-build-isolation \
-        --config-settings editable_mode=compat -e "$ACE_REPO/src/ace"
-    "$ACE_VENV/bin/python" -c \
-        'import grpc; import google.protobuf; import azext_ace; print("ACE and RPC dependencies import successfully")'
-    "$ACE_VENV/bin/az" ace launch --help
-
-Check root can discover ACE and import dependencies using the exact same
-interpreter and development configuration::
-
-    sudo "$ACE_VENV/bin/python" -c \
-        'import grpc; import google.protobuf; import azext_ace; print("Root can import ACE and RPC dependencies")'
     sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" ace launch --help
+        "$ACE_VENV/bin/az" ace launch --name demo-1 \
+        --igvm "$IGVM" --openvmm /usr/bin/openvmm
 
-azdev records source-extension discovery in the development configuration.
-Passing both directories preserves that discovery under sudo; using the
-absolute virtual-environment executable preserves Python dependencies.
-``AZURE_EXTENSION_DIR`` is an extension container directory, not
-``src/ace`` itself. Do not use the entire repository's ``src`` directory as
-an extension container for this workflow.
+The default timeout is 120 seconds; change it with ``--timeout``.
+Custom runtimes require ``--allow-untested-runtime`` and equivalent SNP
+IGVM RPC and below-4-GiB ECAM support; the flag only bypasses package checks.
 
-This executes the editable checkout and environment as root. Use only trusted
-code/dependencies, and do not run it from directories writable by untrusted
-users. The shared configuration is for this development workflow only; no
-Azure login is required by these local lifecycle commands. Do not update or
-remove the environment/checkout while its supervisor is managing an instance.
+Destroy
+~~~~~~~
 
-Returning to the environment for future testing
-----------------------------------------------
-
-After opening a new terminal, reconnecting over SSH, or rebooting L1,
-reactivate the existing environment and restore the shell variables. Use the
-same paths as the initial setup; do not recreate the virtual environment::
-
-    export ACE_REPO="$HOME/azure-cli-extensions"
-    export ACE_VENV="$HOME/.venvs/ace-dev"
-    export IGVM="$HOME/skr-bvt/skr-bvt.igvm"
-    source "$ACE_VENV/bin/activate"
-    export AZURE_CONFIG_DIR="$ACE_VENV/azure-config"
-    export AZURE_EXTENSION_DIR="$ACE_VENV/extensions"
+Stop the VM and OpenVMM and clean up owned sockets, retaining the input IGVM,
+logs, and evidence. Run on the same L1 host::
 
     sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" ace launch --help
+        "$ACE_VENV/bin/az" ace destroy --name demo-1
 
-Then use the launch/destroy commands below. Installed packages and azdev
-registration persist, so there is no need to rerun ``azdev setup`` or
-``azdev extension add ace`` for each session. Python source edits are picked
-up by new CLI invocations through the editable install. If dependencies or
-packaging metadata change, repeat the editable install from the setup section
-after stopping any managed instance.
+The default timeout is 30 seconds; change it with ``--timeout``. Cleanup has
+additional bounded grace periods. Failed destruction is not confirmation
+that the VM stopped; inspect the logs and retry. Repeating destroy is supported.
 
-When finished, stop any test instance with destroy before leaving the
-environment::
+Instances use ``/var/lib/ace/instances`` by default. If you pass ``--state-dir``,
+use the same value for launch and destroy. Always destroy test instances
+before running ``deactivate``: leaving the shell does not stop them, and a host
+reboot does not automatically restart them.
 
-    deactivate
+Create (not implemented)
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-Deactivation only changes the current shell; it does not stop a running VM or
-its supervisor. Reactivating the environment after an L1 reboot does not
-restart previous VMs. Choose a new instance name for each new launch.
+``az ace create`` will package a workload and generate launch artifacts,
+including the IGVM passed to ``az ace launch --igvm``. Skip this step if you
+already have a compatible IGVM.
 
-Launch and destroy on L1
-------------------------
+It currently returns a "not implemented" error. View available options with
+``az ace --help`` or ``az ace <command> --help``. The workflow is:
+bootstrap, host setup, create artifacts or supply an IGVM, launch, destroy.
 
-With the variables above still set, launch the existing BVT image::
+View launch evidence
+--------------------
 
-    sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
-        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" ace launch --name rpc-test-1 \
-        --igvm "$IGVM" \
-        --openvmm /usr/bin/openvmm
+After successful guest readiness, launch saves the JSON response under the
+instance directory. For the example above::
 
-    sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
-        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" ace destroy --name rpc-test-1
+    sudo "$ACE_VENV/bin/python" -m json.tool \
+        /var/lib/ace/instances/demo-1/response.json
 
-If ``ace`` is not recognized, check the two directory variables and root's
-help command above. If ``grpc`` is missing, check that the absolute
-``$ACE_VENV/bin/az`` executable is used, not ``/usr/bin/az``, and repeat the
-editable install in the virtual environment. Do not use plain ``sudo pip``
-or install a package named ``grpc``; the distribution name is ``grpcio``.
+``evidence.report`` is the hex-encoded 1184-byte SNP report. ACE checks the
+report's shape, **not** its signature, measurement, challenge binding, or
+certificate chain. The instance record has ``attestation_verified: false``;
+successful launch is not verified attestation and performs no key release.
 
-If RPC fails with ``RST_STREAM`` and OpenVMM logs ``malformed authority``,
-ensure the checkout includes the client's ``grpc.default_authority`` option.
-ACE sets the HTTP/2 authority to ``localhost`` while still connecting through
-the instance's Unix socket; this does not open a TCP listener or change the
-VM configuration. An editable install picks up this Python source fix on the
-next invocation. Retry with a new instance name.
-
-For server-side diagnostics, add
-``OPENVMM_LOG=info,openvmm_entry=debug,mesh_rpc=debug,h2=debug`` to the
-``sudo env`` launch command above. OpenVMM uses ``OPENVMM_LOG``, not
-``RUST_LOG``. After launch completes, read the retained log with a separate
-command (substitute the instance name). Escape non-printable characters to
-protect the terminal::
-
-    sudo tail -n 200 -- /var/lib/ace/instances/rpc-test-1/openvmm.log | LC_ALL=C sed -n 'l'
-
-The default state root is ``/var/lib/ace/instances``. It must be owned by root
-with mode 0700. ``--state-dir`` changes it; use the same value for destroy.
-Names are 1-32 letters, digits, underscores or hyphens. Retained instance names
-are not reused: choose a new name for another launch to preserve evidence.
-
-Launch starts a detached Python supervisor which owns OpenVMM and captures
-COM1 through a serial Unix socket. It calls ``CreateVM`` then ``ResumeVM``,
-and sends the same relay handshake/application request as ``skr-bvt-client.py``.
-Unlike that transport-only BVT, readiness rejects mock/non-SNP evidence and
-requires a hex-encoded 1184-byte report. It does NOT verify the report signature,
-measurement, challenge binding or certificate chain, and performs no SKR.
-The returned record explicitly has ``attestation_verified: false``.
-
-The default launch timeout is 120 seconds; destroy defaults to 30 seconds.
-Both accept ``--timeout``. Process recovery/cleanup has additional bounded
-grace periods. The guest listener may not be ready immediately after
-``ResumeVM``: empty relay closures and socket errors are retried within the
-launch timeout. Partial/oversized lines, rejected handshakes, invalid JSON,
-and invalid SNP report shapes still fail explicitly. If readiness times out,
-inspect ``com1.log`` for guest boot/application errors as well as
-``openvmm.log``; successful RPC creation/resume alone does not prove guest
-readiness.
-
-Preserve the supervisor until destroy; it is not a systemd
-service and does not automatically restart instances after host reboot.
-
-Each instance directory retains ``instance.json``, runtime/process identity
-records, ``openvmm.log``, ``supervisor.log``, ``com1.log`` and, after successful
-readiness, ``response.json``. The supervisor and OpenVMM survive the launching
-CLI. Destroy releases the VM, quits OpenVMM, checks owned process exit and
-removes sockets, but keeps logs, records and the input IGVM. Repeating destroy
-for a confirmed stopped instance is supported.
-
-RPC errors do not imply successful destruction. A live server with an
-unreachable endpoint produces an explicit error and retains the instance for
-retry. Launch failures attempt RPC rollback, then bounded recovery against
-verified owned processes. PID ownership includes boot identity, process start
-time and command identity to distinguish stale/reused PIDs.
-
-RPC contract and validation
----------------------------
-
-``azext_ace/rpc/vmservice.proto`` is copied unmodified from upstream OpenVMM
-0.2.0, commit ``49742cf0636bdda0dc94757d6185e5e50254873c``, under its MIT
-license. The adjacent Python binding and type stub are generated with
-``grpcio-tools==1.62.3``. Runtime dependencies are declared in ``setup.py``;
-the generator is only needed when regenerating the pinned contract::
-
-    python -m grpc_tools.protoc --proto_path=azext_ace/rpc \
-        --python_out=azext_ace/rpc --pyi_out=azext_ace/rpc \
-        azext_ace/rpc/vmservice.proto
-
-Unit tests cover request parity, a real localhost gRPC transport round trip,
-serial-supervisor behavior with mocked processes, readiness and lifecycle
-failure/ownership handling::
-
-    python -m pytest azext_ace/tests/latest -q
-
-Linux-specific locking/process tests require Linux. The implementation still
-requires actual L1 RPC validation: compare logs and genuine SNP evidence with
-the successful CLI BVT, repeat launch/destroy with new names, and exercise
-timeouts and crashes. Passing unit tests is not a successful SNP boot test.
-
-The setup command may be removed in the future in favor of extension
-installation through ``setup.py``. This is not implemented; ``setup.py``
-declares gRPC/protobuf dependencies but does not provision the L1 host or launch
-L2 during extension installation.
-
-Use ``az ace --help`` or ``az ace <command> --help`` to view the command structure.
+The same directory retains ``instance.json``, ``openvmm.log``,
+``supervisor.log``, and ``com1.log`` for diagnosis, including after destroy.
+Use your custom state directory instead if you specified ``--state-dir``.

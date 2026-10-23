@@ -8,11 +8,13 @@
 from knack.util import CLIError
 
 
-def setup_ace():
-    """Report that automated host provisioning is not implemented."""
-    raise CLIError(
-        '`az ace setup` is not implemented yet. '
-        'This command may be removed in favor of extension installation through setup.py.')
+def setup_ace(yes: bool = False) -> dict:
+    """Prepare supported host dependencies without modifying the developer environment."""
+    from ._setup import setup_host
+    try:
+        return setup_host(yes)
+    except (OSError, ValueError) as error:
+        raise CLIError('Unable to set up ACE host: {}'.format(error)) from error
 
 
 def create_ace():

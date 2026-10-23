@@ -22,7 +22,7 @@ import grpc
 from google.protobuf.empty_pb2 import Empty
 from knack.util import CLIError
 
-from azext_ace import _instance, _lifecycle, _rpc
+from azext_ace import _instance, _lifecycle, _rpc, _runtime
 from azext_ace import _worker
 from azext_ace.rpc import vmservice_pb2 as vm
 
@@ -186,35 +186,35 @@ class InstanceTest(LinuxFilesystemTest):
 
     def test_runtime_requires_known_package_or_explicit_opt_in(self):
         """Require expected package provenance unless the caller knowingly permits a custom runtime."""
-        with patch('azext_ace._lifecycle.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
-                patch('azext_ace._lifecycle.subprocess.run',
+        with patch('azext_ace._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
+                patch('azext_ace._runtime.subprocess.run',
                       return_value=SimpleNamespace(returncode=0, stdout='0.2.0-2.azl3')):
-            self.assertEqual(_lifecycle._resolve_runtime('openvmm', False).name, 'openvmm')
-        with patch('azext_ace._lifecycle.shutil.which', side_effect=['/custom/openvmm', None]):
+            self.assertEqual(_runtime.resolve_runtime('openvmm', False).name, 'openvmm')
+        with patch('azext_ace._runtime.shutil.which', side_effect=['/custom/openvmm', None]):
             with self.assertRaisesRegex(CLIError, 'low-ECAM'):
-                _lifecycle._resolve_runtime('openvmm', False)
-        with patch('azext_ace._lifecycle.shutil.which', side_effect=['/custom/openvmm', None]), \
-                patch('azext_ace._lifecycle.logger.warning') as warning:
-            _lifecycle._resolve_runtime('openvmm', True)
+                _runtime.resolve_runtime('openvmm', False)
+        with patch('azext_ace._runtime.shutil.which', side_effect=['/custom/openvmm', None]), \
+                patch('azext_ace._runtime.logger.warning') as warning:
+            _runtime.resolve_runtime('openvmm', True)
             warning.assert_called_once()
 
     def test_modified_package_requires_explicit_opt_in(self):
         """Treat failed RPM integrity verification as an unrecognized runtime."""
-        with patch('azext_ace._lifecycle.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
-                patch('azext_ace._lifecycle.subprocess.run', side_effect=[
+        with patch('azext_ace._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
+                patch('azext_ace._runtime.subprocess.run', side_effect=[
                     SimpleNamespace(returncode=0, stdout='0.2.0-2.azl3'),
                     SimpleNamespace(returncode=1, stdout='modified executable')]):
             with self.assertRaisesRegex(CLIError, 'unrecognized runtime'):
-                _lifecycle._resolve_runtime('openvmm', False)
+                _runtime.resolve_runtime('openvmm', False)
 
     def test_package_verification_timeout_is_actionable(self):
         """Translate a stalled RPM check into a clear CLI error."""
         import subprocess
-        with patch('azext_ace._lifecycle.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
-                patch('azext_ace._lifecycle.subprocess.run',
+        with patch('azext_ace._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
+                patch('azext_ace._runtime.subprocess.run',
                       side_effect=subprocess.TimeoutExpired('rpm', 10)):
             with self.assertRaisesRegex(CLIError, 'Timed out verifying'):
-                _lifecycle._resolve_runtime('openvmm', False)
+                _runtime.resolve_runtime('openvmm', False)
 
     def test_slow_guest_response_has_total_deadline(self):
         """Prevent a slow response from extending the caller's absolute readiness deadline."""
@@ -298,6 +298,9 @@ class GuestProbeTest(LinuxFilesystemTest):
                 {'tee': 'mock', 'report': None},
                 {'tee': 'snp', 'report': 'zz' * 1184},
                 {'tee': 'snp', 'report': '00'},
+                {'tee': 'mock', 'report': '00' * 1184},
+                None,
+                'snp',
                 []):
             with self.subTest(evidence_type=type(evidence).__name__), \
                     tempfile.TemporaryDirectory() as temporary:
@@ -311,7 +314,7 @@ class GuestProbeTest(LinuxFilesystemTest):
                         patch('azext_ace._lifecycle.socket.socket') as factory:
                     connection = factory.return_value.__enter__.return_value
                     connection.makefile.return_value.__enter__.return_value = stream
-                    if isinstance(evidence, dict) and evidence.get('report') == '00' * 1184:
+                    if evidence == {'tee': 'snp', 'report': '00' * 1184}:
                         _lifecycle.probe_guest(directory, time.monotonic() + 5)
                         self.assertEqual((directory / 'response.json').read_bytes(), response)
                         self.assertEqual(stream.write.call_args_list[0].args, (b'CONNECT 4050\n',))
@@ -387,7 +390,7 @@ class LifecycleTest(LinuxFilesystemTest):
             'instance_path': self.directory,
             'instance_lock': nullcontext(),
             'check_private': None,
-            '_resolve_runtime': self.executable,
+            'resolve_runtime': self.executable,
         }
         for name, result in patches.items():
             patcher = patch('azext_ace._lifecycle.' + name, return_value=result)
@@ -406,6 +409,54 @@ class LifecycleTest(LinuxFilesystemTest):
             'supervisor': {'pid': 123}, 'openvmm': {'pid': 456},
         })
         return state
+
+    def test_supervisor_start_preserves_environment_and_records_identity(self) -> None:
+        """Keep source discovery and detached process ownership when extracting startup."""
+        self.directory.mkdir()
+        state = {'status': 'starting'}
+        with patch.dict(os.environ, {'PYTHONPATH': 'existing-source'}), \
+                patch('azext_ace._lifecycle.subprocess.Popen') as popen, \
+                patch('azext_ace._lifecycle.identity', return_value={'pid': 123}):
+            _lifecycle._start_supervisor(self.directory, state)
+        options = popen.call_args.kwargs
+        self.assertTrue(options['start_new_session'])
+        self.assertTrue(options['close_fds'])
+        self.assertEqual(options['stdin'], _lifecycle.subprocess.DEVNULL)
+        self.assertEqual(
+            options['env']['PYTHONPATH'],
+            str(Path(_lifecycle.__file__).resolve().parent.parent) + os.pathsep + 'existing-source')
+        self.assertEqual(_instance.read_record(self.directory / 'instance.json'), {
+            'status': 'starting', 'supervisor': {'pid': 123},
+        })
+
+    def test_supervisor_early_exit_is_reported(self) -> None:
+        """Reap an exited worker without publishing a successful supervisor record."""
+        self.directory.mkdir()
+        with patch('azext_ace._lifecycle.subprocess.Popen') as popen, \
+                patch('azext_ace._lifecycle.identity', return_value=None):
+            with self.assertRaisesRegex(CLIError, 'Supervisor failed to start'):
+                _lifecycle._start_supervisor(self.directory, {})
+        popen.return_value.wait.assert_called_once_with(timeout=5)
+        self.assertFalse((self.directory / 'instance.json').exists())
+
+    def test_rollback_retains_original_error_when_cleanup_fails(self) -> None:
+        """Recover after failed Quit and record cleanup errors without hiding the launch error."""
+        self.directory.mkdir()
+        state = {'status': 'paused', 'supervisor': {'pid': 123}}
+        self.client.call.side_effect = CLIError('Quit rejected')
+        with patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_ace._lifecycle._stop_runtime', side_effect=CLIError('still alive')) as stop, \
+                patch('azext_ace._lifecycle.logger.warning') as warning, \
+                patch('azext_ace._lifecycle.logger.error') as log_error:
+            _lifecycle._rollback_launch(self.directory, state, CLIError('resume rejected'))
+        self.client.call.assert_called_once_with('Quit')
+        stop.assert_called_once_with(self.directory, state)
+        warning.assert_called_once()
+        log_error.assert_called_once()
+        saved = _instance.read_record(self.directory / 'instance.json')
+        self.assertEqual(saved['status'], 'failed')
+        self.assertEqual(saved['error'], 'resume rejected')
+        self.assertEqual(saved['cleanup_error'], 'still alive')
 
     def test_launch_create_then_resume_and_persist(self):
         """Check creation precedes resume and successful readiness produces persistent running state."""

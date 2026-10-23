@@ -2,11 +2,14 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
-"""Register local instance, image, runtime, and timeout arguments for ACE lifecycle commands."""
+"""Register host setup and local lifecycle arguments."""
 
 
 def load_arguments(self, _):
     """Attach shared lifecycle arguments and launch-only boot/runtime options to the command loader."""
+    with self.argument_context('ace setup') as context:
+        context.argument('yes', options_list=['--yes', '-y'], action='store_true',
+                         help='Approve installation of the supported OpenVMM package without prompting.')
     for command in ('ace launch', 'ace destroy'):
         with self.argument_context(command) as context:
             context.argument('name', options_list=['--name', '-n'], required=True,

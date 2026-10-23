@@ -29,9 +29,9 @@ class AceCommandTest(unittest.TestCase):
         })
 
     def test_command_arguments(self):
-        """Check that only launch/destroy expose the new instance and runtime options."""
+        """Keep setup approval and lifecycle options scoped to the appropriate commands."""
         expected = {
-            'ace setup': set(),
+            'ace setup': {'yes'},
             'ace create': set(),
             'ace launch': {'name', 'igvm', 'openvmm', 'state_dir', 'timeout', 'allow_untested_runtime'},
             'ace destroy': {'name', 'state_dir', 'timeout'},
@@ -47,19 +47,14 @@ class AceCommandTest(unittest.TestCase):
                 self.assertEqual(set(table[command].arguments), expected[command])
 
     def test_placeholder_commands(self):
-        """Ensure unfinished provisioning/image-building commands fail explicitly."""
-        for command in ('setup', 'create'):
-            with self.subTest(command=command):
-                handler = getattr(custom, '{}_ace'.format(command))
-                with self.assertRaisesRegex(
-                        CLIError, '`az ace {}` is not implemented yet'.format(command)):
-                    handler()
+        """Ensure unfinished image building still fails explicitly."""
+        with self.assertRaisesRegex(CLIError, '`az ace create` is not implemented yet'):
+            custom.create_ace()
 
     def test_command_help(self):
         """Distinguish placeholder help from the local-L1 lifecycle requirements."""
-        for command in ('setup', 'create'):
-            with self.subTest(command=command):
-                self.assertIn('Not implemented yet.', helps['ace {}'.format(command)])
+        self.assertIn('Not implemented yet.', helps['ace create'])
+        self.assertIn('Azure Linux 3.0 L1', helps['ace setup'])
         for command in ('launch', 'destroy'):
             self.assertIn('Linux L1', helps['ace {}'.format(command)])
 
@@ -73,9 +68,21 @@ class AceCommandTest(unittest.TestCase):
             self.assertEqual(custom.destroy_ace('demo'), {'status': 'destroyed'})
             destroy.assert_called_once_with('demo', '/var/lib/ace/instances', 30)
 
-    def test_setup_future_removal_note(self):
-        """Preserve the existing explanation of setup's possible replacement by installation."""
-        self.assertIn('may be removed', helps['ace setup'])
+    def test_setup_delegation(self) -> None:
+        """Keep host preparation separate from Python dependency installation."""
         self.assertIn('setup.py', helps['ace setup'])
-        with self.assertRaisesRegex(CLIError, 'may be removed.*setup.py'):
-            custom.setup_ace()
+        with patch('azext_ace._setup.setup_host', return_value={'status': 'ready'}) as setup:
+            self.assertEqual(custom.setup_ace(), {'status': 'ready'})
+            setup.assert_called_once_with(False)
+        with patch('azext_ace._setup.setup_host', return_value={'status': 'ready'}) as setup:
+            self.assertEqual(custom.setup_ace(yes=True), {'status': 'ready'})
+            setup.assert_called_once_with(True)
+        with patch('azext_ace._setup.setup_host', side_effect=OSError('cannot read os-release')):
+            with self.assertRaisesRegex(CLIError, 'Unable to set up ACE host.*cannot read os-release'):
+                custom.setup_ace()
+
+    def test_setup_preserves_cli_errors(self) -> None:
+        """Do not obscure explicit host setup failures with a generic wrapper."""
+        with patch('azext_ace._setup.setup_host', side_effect=CLIError('Operation cancelled.')):
+            with self.assertRaisesRegex(CLIError, '^Operation cancelled\\.$'):
+                custom.setup_ace()

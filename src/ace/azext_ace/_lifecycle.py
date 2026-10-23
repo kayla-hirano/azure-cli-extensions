@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import secrets
-import shutil
 import socket
 import stat
 import subprocess
@@ -25,6 +24,7 @@ from ._instance import (DEFAULT_STATE_DIR, alive, check_private, cleanup_sockets
                         instance_lock, instance_path, read_record, require_host, stop_owned,
                         write_record)
 from ._rpc import VmClient, create_request
+from ._runtime import resolve_runtime
 from .rpc import vmservice_pb2 as vm
 
 logger = get_logger(__name__)
@@ -78,9 +78,8 @@ def probe_guest(directory: Path, deadline: float) -> None:
                     response = read_line(stream, connection, deadline)
             value = json.loads(response)
             evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
-            report = evidence.get('report') if isinstance(evidence, dict) else None
-            if not isinstance(evidence, dict) or evidence.get('tee') != 'snp' \
-                    or not isinstance(report, str) or len(report) != 2368:
+            report = evidence.get('report') if isinstance(evidence, dict) and evidence.get('tee') == 'snp' else None
+            if not isinstance(report, str) or len(report) != 2368:
                 raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
             try:
                 bytes.fromhex(report)
@@ -95,37 +94,6 @@ def probe_guest(directory: Path, deadline: float) -> None:
         except (ValueError, TypeError) as error:
             raise CLIError('Invalid guest JSON response: {}'.format(error)) from error
     raise CLIError('Guest readiness timed out: {}'.format(last_error))
-
-
-def _resolve_runtime(openvmm: str, allow_untested_runtime: bool) -> Path:
-    """Resolve the executable and require expected RPM provenance unless explicitly bypassed."""
-    selected = shutil.which(openvmm)
-    if selected is None:
-        raise CLIError('OpenVMM executable not found: {}'.format(openvmm))
-    executable = Path(selected).resolve()
-    rpm = shutil.which('rpm')
-    package = None
-    if rpm:
-        try:
-            result = subprocess.run(
-                [rpm, '-qf', '--queryformat', '%{VERSION}-%{RELEASE}', str(executable)],
-                capture_output=True, text=True, timeout=10, check=False)
-            if result.returncode == 0:
-                package = result.stdout.strip()
-                verification = subprocess.run(
-                    [rpm, '-Vf', str(executable)], capture_output=True, text=True, timeout=10, check=False)
-                if verification.returncode != 0:
-                    package = None
-        except subprocess.TimeoutExpired as error:
-            raise CLIError('Timed out verifying the OpenVMM RPM package.') from error
-    if package != '0.2.0-2.azl3':
-        if not allow_untested_runtime:
-            raise CLIError(
-                'Expected Azure Linux OpenVMM 0.2.0-2.azl3 with SNP RPC and low-ECAM patch; '
-                'found {}. Use --allow-untested-runtime only after checking equivalent support.'
-                .format(package or 'an unrecognized runtime'))
-        logger.warning('Using untested OpenVMM runtime. Verify SNP IGVM RPC and below-4-GiB ECAM support.')
-    return executable
 
 
 def _wait_runtime(directory: Path, supervisor: dict, deadline: float) -> dict:
@@ -169,11 +137,45 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _start_supervisor(directory: Path, state: dict) -> None:
+    """Start the persistent OpenVMM owner and save its process identity."""
+    environment = os.environ.copy()
+    environment['PYTHONPATH'] = str(Path(__file__).resolve().parent.parent) + (
+        os.pathsep + environment['PYTHONPATH'] if environment.get('PYTHONPATH') else '')
+    with (directory / 'supervisor.log').open('ab') as log:
+        worker = subprocess.Popen(
+            [sys.executable, '-m', 'azext_ace._worker', str(directory)],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            env=environment, start_new_session=True, close_fds=True)
+    state['supervisor'] = identity(worker.pid)
+    if state['supervisor'] is None:
+        worker.wait(timeout=5)
+        raise CLIError('Supervisor failed to start; inspect supervisor.log.')
+    write_record(directory / 'instance.json', state)
+
+
+def _rollback_launch(directory: Path, state: dict, error: BaseException) -> None:
+    """Attempt RPC rollback and owned-process recovery, retaining failure evidence."""
+    state.update(status='failed', error=str(error))
+    # A timed-out CreateVM may have succeeded, so request server exit before signal recovery.
+    try:
+        if (directory / 'rpc.sock').is_socket():
+            with VmClient(directory / 'rpc.sock', time.monotonic() + 5) as client:
+                client.call('Quit')
+    except CLIError as cleanup_error:
+        logger.warning('RPC rollback failed; attempting owned-process recovery: %s', cleanup_error)
+    try:
+        _stop_runtime(directory, state)
+    except (CLIError, OSError) as cleanup_error:
+        state['cleanup_error'] = str(cleanup_error)
+        logger.error('Launch cleanup incomplete: %s', cleanup_error)
+    write_record(directory / 'instance.json', state)
+
+
 def launch(name: str, igvm: str, openvmm: str = 'openvmm',
            state_dir: str = DEFAULT_STATE_DIR, timeout: float = 120,
            allow_untested_runtime: bool = False) -> dict:
     """Create and resume a supervised SNP instance, persisting state and rolling back failures."""
-    # Validate the Linux L1 host, existing IGVM, and runtime before starting any processes.
     require_host(timeout)
     image = Path(igvm).expanduser().resolve()
     if not image.is_file():
@@ -181,10 +183,9 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
     device = Path('/dev/mshv')
     if not device.exists() or not stat.S_ISCHR(device.stat().st_mode):
         raise CLIError('L1 requires the /dev/mshv character device.')
-    executable = _resolve_runtime(openvmm, allow_untested_runtime)
+    executable = resolve_runtime(openvmm, allow_untested_runtime)
     executable_digest = _file_digest(executable)
     image_digest = _file_digest(image)
-    # Serialize lifecycle commands and retain private configuration/evidence for this instance.
     directory = instance_path(state_dir, name)
     deadline = time.monotonic() + timeout
     with instance_lock(directory):
@@ -199,20 +200,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
         }
         write_record(directory / 'instance.json', state)
         try:
-            # The persistent worker reads instance.json and owns OpenVMM after this CLI exits.
-            environment = os.environ.copy()
-            environment['PYTHONPATH'] = str(Path(__file__).resolve().parent.parent) + (
-                os.pathsep + environment['PYTHONPATH'] if environment.get('PYTHONPATH') else '')
-            with (directory / 'supervisor.log').open('ab') as log:
-                worker = subprocess.Popen(
-                    [sys.executable, '-m', 'azext_ace._worker', str(directory)],
-                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                    env=environment, start_new_session=True, close_fds=True)
-            state['supervisor'] = identity(worker.pid)
-            if state['supervisor'] is None:
-                worker.wait(timeout=5)
-                raise CLIError('Supervisor failed to start; inspect supervisor.log.')
-            write_record(directory / 'instance.json', state)
+            _start_supervisor(directory, state)
             # Process ownership must be published before waiting for the gRPC endpoint to be usable.
             _wait_runtime(directory, state['supervisor'], deadline)
             with VmClient(directory / 'rpc.sock', deadline) as client:
@@ -229,27 +217,12 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
             logger.warning('SNP report received; its signature, measurement and trust chain are NOT verified.')
             return state
         except (CLIError, OSError, ValueError, KeyError, subprocess.SubprocessError, KeyboardInterrupt) as error:
-            state['status'] = 'failed'
-            state['error'] = str(error)
-            # Roll back the server with Quit, even if a timed-out CreateVM may have succeeded.
-            try:
-                if (directory / 'rpc.sock').is_socket():
-                    with VmClient(directory / 'rpc.sock', time.monotonic() + 5) as client:
-                        client.call('Quit')
-            except CLIError as cleanup_error:
-                logger.warning('RPC rollback failed; attempting owned-process recovery: %s', cleanup_error)
-            try:
-                _stop_runtime(directory, state)
-            except (CLIError, OSError) as cleanup_error:
-                state['cleanup_error'] = str(cleanup_error)
-                logger.error('Launch cleanup incomplete: %s', cleanup_error)
-            write_record(directory / 'instance.json', state)
+            _rollback_launch(directory, state, error)
             raise CLIError('Launch failed: {}. Evidence retained in {}'.format(error, directory)) from error
 
 
 def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) -> dict:
     """Reconcile an instance, tear down its VM through RPC, and preserve logs and image files."""
-    # Lock and validate the saved instance before connecting to any existing runtime.
     require_host(timeout)
     directory = instance_path(state_dir, name)
     with instance_lock(directory):
@@ -289,7 +262,6 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
         _stop_runtime(directory, state)
         if (directory / 'worker-error.json').exists():
             logger.warning('Supervisor reported an error; resources are stopped. Inspect supervisor.log.')
-        # Retain the instance directory, logs, and evidence; destruction does not delete the image.
         state['status'] = 'destroyed'
         state.pop('error', None)
         state.pop('cleanup_error', None)
