@@ -29,6 +29,11 @@ dependencies. Then prepare the host::
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
         "$ACE_VENV/bin/az" ace setup
 
+Why sudo? ACE currently requires root for setup, launch, and destroy: setup
+can install system packages, while launch/destroy manage the host's VM
+runtime, access ``/dev/mshv``, and use root-owned instance state. Developer
+bootstrap and ordinary help commands do not need sudo.
+
 Always use the virtual environment's absolute ``az`` path under sudo, not
 plain ``sudo az``. This runs your checkout and dependencies as root: use
 trusted code in directories not writable by untrusted users.
@@ -88,6 +93,10 @@ choosing a new name for every launch. Set ``IGVM`` to your image::
         "$ACE_VENV/bin/az" ace launch --name demo-1 \
         --igvm "$IGVM" --openvmm /usr/bin/openvmm
 
+For demos, only one ACE-managed enclave may be active on an L1, even with
+different names or ``--state-dir`` values. A second launch fails until the
+existing runtime stops. OpenVMM starts on demand, not during setup.
+
 The default timeout is 120 seconds; change it with ``--timeout``.
 Custom runtimes require ``--allow-untested-runtime`` and equivalent SNP
 IGVM RPC and below-4-GiB ECAM support; the flag only bypasses package checks.
@@ -105,6 +114,8 @@ logs, and evidence. Run on the same L1 host::
 The default timeout is 30 seconds; change it with ``--timeout``. Cleanup has
 additional bounded grace periods. Failed destruction is not confirmation
 that the VM stopped; inspect the logs and retry. Repeating destroy is supported.
+After the instance's OpenVMM and supervisor exit, a new instance can be launched
+with a new name. The host-wide guard remains held while either process lives.
 
 Instances use ``/var/lib/ace/instances`` by default. If you pass ``--state-dir``,
 use the same value for launch and destroy. Always destroy test instances

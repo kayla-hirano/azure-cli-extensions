@@ -43,6 +43,8 @@ helps['ace launch'] = """
     long-summary: >
         Run as root on Linux L1. Uses the SKR BVT's fixed CPU, memory, PCIe and vsock configuration.
         Starts a persistent local OpenVMM gRPC server, creates an SNP IGVM VM and resumes it.
+        Allows only one active ACE enclave per L1, regardless of name or state directory.
+        Destroy the existing instance before launching another.
         Waits for an SNP-shaped guest response, but does not verify attestation or release keys.
         Logs and instance state remain under the state directory.
     examples:

@@ -21,6 +21,7 @@ from typing import Dict, Iterator, Optional
 from knack.util import CLIError
 
 DEFAULT_STATE_DIR = '/var/lib/ace/instances'
+HOST_STATE_DIR = '/run/ace'
 
 
 def require_host(timeout: float) -> None:
@@ -60,8 +61,9 @@ def check_private(path: Path) -> None:
 
 
 @contextmanager
-def instance_lock(directory: Path) -> Iterator[None]:
-    """Hold a nonblocking per-instance flock so launch and destroy cannot modify state concurrently."""
+def instance_lock(directory: Path, busy_error: str = 'Another command is managing this ACE instance.'
+                  ) -> Iterator[int]:
+    """Hold a nonblocking flock, exposing its descriptor for explicit child inheritance."""
     import fcntl
     lock_path = directory.parent / (directory.name + '.lock')
     descriptor = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -72,10 +74,21 @@ def instance_lock(directory: Path) -> Iterator[None]:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise CLIError('Another command is managing this ACE instance.') from error
-        yield
+            raise CLIError(busy_error) from error
+        yield descriptor
     finally:
         os.close(descriptor)
+
+
+@contextmanager
+def host_lock() -> Iterator[int]:
+    """Reserve the single ACE runtime slot independently of instance names and state roots."""
+    directory = instance_path(HOST_STATE_DIR, 'enclave')
+    with instance_lock(
+            directory, 'An ACE enclave is already starting or running on this L1. '
+            'Destroy the existing instance before launching another.') as descriptor:
+        # Only close our descriptor on exit: inherited copies keep the flock held until all owners exit.
+        yield descriptor
 
 
 def write_record(path: Path, value: dict) -> None:

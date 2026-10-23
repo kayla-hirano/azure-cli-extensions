@@ -362,10 +362,11 @@ class WorkerTest(LinuxFilesystemTest):
                 child = popen.return_value
                 child.poll.side_effect = [None, None, 0, 0]
                 child.returncode = 0
-                _worker.supervise(directory)
+                _worker.supervise(directory, 47)
                 arguments = popen.call_args.args[0]
                 self.assertEqual(arguments[:2], ['/usr/bin/openvmm', '--rpc'])
                 self.assertIn('transport=grpc', arguments[2])
+                self.assertEqual(popen.call_args.kwargs['pass_fds'], (47,))
                 self.assertEqual((directory / 'com1.log').read_bytes(), b'guest serial output\n')
                 self.assertEqual(_instance.read_record(directory / 'exit.json')['returncode'], 0)
                 child.terminate.assert_not_called()
@@ -389,6 +390,7 @@ class LifecycleTest(LinuxFilesystemTest):
             'require_host': None,
             'instance_path': self.directory,
             'instance_lock': nullcontext(),
+            'host_lock': nullcontext(47),
             'check_private': None,
             'resolve_runtime': self.executable,
         }
@@ -417,10 +419,12 @@ class LifecycleTest(LinuxFilesystemTest):
         with patch.dict(os.environ, {'PYTHONPATH': 'existing-source'}), \
                 patch('azext_ace._lifecycle.subprocess.Popen') as popen, \
                 patch('azext_ace._lifecycle.identity', return_value={'pid': 123}):
-            _lifecycle._start_supervisor(self.directory, state)
+            _lifecycle._start_supervisor(self.directory, state, 47)
         options = popen.call_args.kwargs
         self.assertTrue(options['start_new_session'])
         self.assertTrue(options['close_fds'])
+        self.assertEqual(options['pass_fds'], (47,))
+        self.assertEqual(popen.call_args.args[0][-1], '47')
         self.assertEqual(options['stdin'], _lifecycle.subprocess.DEVNULL)
         self.assertEqual(
             options['env']['PYTHONPATH'],
@@ -435,7 +439,7 @@ class LifecycleTest(LinuxFilesystemTest):
         with patch('azext_ace._lifecycle.subprocess.Popen') as popen, \
                 patch('azext_ace._lifecycle.identity', return_value=None):
             with self.assertRaisesRegex(CLIError, 'Supervisor failed to start'):
-                _lifecycle._start_supervisor(self.directory, {})
+                _lifecycle._start_supervisor(self.directory, {}, 47)
         popen.return_value.wait.assert_called_once_with(timeout=5)
         self.assertFalse((self.directory / 'instance.json').exists())
 
@@ -481,6 +485,7 @@ class LifecycleTest(LinuxFilesystemTest):
                              ['CreateVM', 'ResumeVM'])
             probe.assert_called_once()
             self.assertTrue(popen.call_args.kwargs['start_new_session'])
+            self.assertEqual(popen.call_args.kwargs['pass_fds'], (47,))
         self.assertEqual(_instance.read_record(self.directory / 'instance.json')['status'], 'running')
 
     def test_destroy_teardown_then_quit_and_preserve_image(self):
@@ -489,13 +494,34 @@ class LifecycleTest(LinuxFilesystemTest):
         self.client.call.return_value = vm.PropertiesVMResponse(state=vm.Running)
         with patch('azext_ace._lifecycle.alive', return_value=True), \
                 patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_ace._lifecycle.host_lock') as host_guard, \
                 patch('azext_ace._lifecycle._stop_runtime') as stop:
             result = _lifecycle.destroy('demo')
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                              ['PropertiesVM', 'TeardownVM', 'Quit'])
             stop.assert_called_once()
+            host_guard.assert_not_called()
         self.assertEqual(result['status'], 'destroyed')
         self.assertTrue(self.image.exists())
+
+    def test_launch_rejects_busy_host_before_starting_processes(self) -> None:
+        """A different name or custom state root must not bypass the single-enclave policy."""
+        original_exists = Path.exists
+        original_stat = Path.stat
+        device = SimpleNamespace(st_mode=0o020600)
+        with patch('azext_ace._lifecycle.Path.exists', autospec=True,
+                   side_effect=lambda path: True if str(path) == str(Path('/dev/mshv'))
+                   else original_exists(path)), \
+                patch('azext_ace._lifecycle.Path.stat', autospec=True,
+                      side_effect=lambda path, **kw: device if str(path) == str(Path('/dev/mshv'))
+                      else original_stat(path, **kw)), \
+                patch('azext_ace._lifecycle.host_lock',
+                      side_effect=CLIError('An ACE enclave is already starting or running on this L1.')), \
+                patch('azext_ace._lifecycle.subprocess.Popen') as popen:
+            with self.assertRaisesRegex(CLIError, 'already starting or running'):
+                _lifecycle.launch('another-demo', str(self.image), state_dir=str(self.base / 'other-root'))
+            popen.assert_not_called()
+        self.assertFalse(self.directory.exists())
 
     def test_destroy_rpc_failure_preserves_state_for_retry(self):
         """Keep failed destruction explicit and retryable instead of claiming cleanup succeeded."""

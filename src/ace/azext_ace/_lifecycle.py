@@ -20,7 +20,7 @@ from typing import BinaryIO, Optional
 from knack.log import get_logger
 from knack.util import CLIError
 
-from ._instance import (DEFAULT_STATE_DIR, alive, check_private, cleanup_sockets, identity,
+from ._instance import (DEFAULT_STATE_DIR, alive, check_private, cleanup_sockets, host_lock, identity,
                         instance_lock, instance_path, read_record, require_host, stop_owned,
                         write_record)
 from ._rpc import VmClient, create_request
@@ -137,16 +137,16 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _start_supervisor(directory: Path, state: dict) -> None:
+def _start_supervisor(directory: Path, state: dict, host_lock_fd: int) -> None:
     """Start the persistent OpenVMM owner and save its process identity."""
     environment = os.environ.copy()
     environment['PYTHONPATH'] = str(Path(__file__).resolve().parent.parent) + (
         os.pathsep + environment['PYTHONPATH'] if environment.get('PYTHONPATH') else '')
     with (directory / 'supervisor.log').open('ab') as log:
         worker = subprocess.Popen(
-            [sys.executable, '-m', 'azext_ace._worker', str(directory)],
+            [sys.executable, '-m', 'azext_ace._worker', str(directory), str(host_lock_fd)],
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-            env=environment, start_new_session=True, close_fds=True)
+            env=environment, start_new_session=True, close_fds=True, pass_fds=(host_lock_fd,))
     state['supervisor'] = identity(worker.pid)
     if state['supervisor'] is None:
         worker.wait(timeout=5)
@@ -188,7 +188,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
     image_digest = _file_digest(image)
     directory = instance_path(state_dir, name)
     deadline = time.monotonic() + timeout
-    with instance_lock(directory):
+    with host_lock() as host_lock_fd, instance_lock(directory):
         if directory.exists():
             raise CLIError('Instance already exists. Use a new --name; existing evidence is retained.')
         directory.mkdir(mode=0o700)
@@ -200,7 +200,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
         }
         write_record(directory / 'instance.json', state)
         try:
-            _start_supervisor(directory, state)
+            _start_supervisor(directory, state, host_lock_fd)
             # Process ownership must be published before waiting for the gRPC endpoint to be usable.
             _wait_runtime(directory, state['supervisor'], deadline)
             with VmClient(directory / 'rpc.sock', deadline) as client:

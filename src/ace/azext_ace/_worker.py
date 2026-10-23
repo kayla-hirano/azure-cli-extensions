@@ -18,7 +18,7 @@ from pathlib import Path
 from ._instance import cleanup_sockets, identity, read_record, write_record
 
 
-def supervise(directory: Path) -> None:
+def supervise(directory: Path, host_lock_fd: int) -> None:
     """Own the server child and serial listener, publish identities, and clean up when either stops."""
     # The launching CLI saved configuration here; state['openvmm'] is the executable path, not a PID.
     state = read_record(directory / 'instance.json')
@@ -46,7 +46,8 @@ def supervise(directory: Path) -> None:
                 child = subprocess.Popen(
                     [state['openvmm'], '--rpc', 'path={},transport=grpc'.format(directory / 'rpc.sock')],
                     stdin=subprocess.DEVNULL, stdout=host_log, stderr=subprocess.STDOUT,
-                    close_fds=True)
+                    # Keep the host lease if this supervisor crashes before OpenVMM exits.
+                    close_fds=True, pass_fds=(host_lock_fd,))
                 child_identity = identity(child.pid)
                 if child_identity is None:
                     raise RuntimeError('OpenVMM exited during startup; inspect openvmm.log.')
@@ -99,7 +100,7 @@ def main() -> None:
     os.umask(0o077)
     directory = Path(sys.argv[1])
     try:
-        supervise(directory)
+        supervise(directory, int(sys.argv[2]))
     except Exception:
         # This is a process boundary: retain the traceback and fail, rather than hiding worker errors.
         traceback.print_exc()
