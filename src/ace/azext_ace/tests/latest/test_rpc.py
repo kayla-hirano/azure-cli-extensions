@@ -133,9 +133,11 @@ class InstanceTest(LinuxFilesystemTest):
     """Exercise record safety, process identity, host prerequisites, and runtime provenance checks."""
 
     def test_line_limits(self):
-        """Accept newline framing and reject empty, oversized, or incomplete relay lines."""
+        """Retry empty connections but reject oversized or incomplete relay lines."""
         self.assertEqual(_lifecycle.read_line(io.BytesIO(b'OK 4050\n')), b'OK 4050\n')
-        for line in (b'', b'unterminated', b'x' * (_lifecycle.MAX_LINE_BYTES + 1) + b'\n'):
+        with self.assertRaisesRegex(ConnectionError, 'closed before'):
+            _lifecycle.read_line(io.BytesIO(b''))
+        for line in (b'unterminated', b'x' * (_lifecycle.MAX_LINE_BYTES + 1) + b'\n'):
             with self.subTest(line_size=len(line)), self.assertRaises(CLIError):
                 _lifecycle.read_line(io.BytesIO(line))
 
@@ -241,6 +243,53 @@ class InstanceTest(LinuxFilesystemTest):
 
 class GuestProbeTest(LinuxFilesystemTest):
     """Test the existing relay protocol and the stronger SNP-shape readiness check."""
+
+    def test_probe_retries_empty_handshake_or_response(self) -> None:
+        """Allow early relay closures during boot without accepting an empty guest response."""
+        response = json.dumps({'evidence': {'tee': 'snp', 'report': '00' * 1184}}).encode() + b'\n'
+        for initial in (b'', b'OK 4050\n'):
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                _instance.write_record(directory / 'runtime.json', {'openvmm': {}, 'supervisor': {}})
+                streams = []
+                for data in (initial, b'OK 4050\n' + response):
+                    stream = MagicMock()
+                    stream.read.side_effect = io.BytesIO(data).read
+                    streams.append(stream)
+                with patch('azext_ace._lifecycle.alive', return_value=True), \
+                        patch('azext_ace._lifecycle.socket.socket') as factory, \
+                        patch('azext_ace._lifecycle.time.sleep') as sleep, \
+                        patch('azext_ace._lifecycle.logger.debug') as debug:
+                    connection = factory.return_value.__enter__.return_value
+                    connection.makefile.return_value.__enter__.side_effect = streams
+                    _lifecycle.probe_guest(directory, time.monotonic() + 5)
+                    self.assertEqual(connection.connect.call_count, 2)
+                    sleep.assert_called_once()
+                    debug.assert_called_once()
+                self.assertEqual((directory / 'response.json').read_bytes(), response)
+
+    def test_probe_empty_connections_respect_deadline(self) -> None:
+        """Keep repeated early closures bounded by the original readiness budget."""
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _instance.write_record(directory / 'runtime.json', {'openvmm': {}, 'supervisor': {}})
+            clock = [0.0]
+
+            def advance(seconds: float) -> None:
+                """Advance the test clock instead of waiting for another boot-time retry."""
+                clock[0] += seconds
+
+            with patch('azext_ace._lifecycle.alive', return_value=True), \
+                    patch('azext_ace._lifecycle.socket.socket') as factory, \
+                    patch('azext_ace._lifecycle.time.monotonic', side_effect=lambda: clock[0]), \
+                    patch('azext_ace._lifecycle.time.sleep', side_effect=advance):
+                connection = factory.return_value.__enter__.return_value
+                stream = connection.makefile.return_value.__enter__.return_value
+                stream.read.return_value = b''
+                with self.assertRaisesRegex(CLIError, 'readiness timed out: Guest relay closed'):
+                    _lifecycle.probe_guest(directory, 1.0)
+                self.assertEqual(connection.connect.call_count, 2)
+                self.assertFalse((directory / 'response.json').exists())
 
     def test_probe_accepts_only_snp_report_shape(self):
         """Preserve the BVT request while rejecting mock, malformed, or incorrectly sized reports."""

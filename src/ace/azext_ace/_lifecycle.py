@@ -47,8 +47,11 @@ def read_line(stream: BinaryIO, connection: Optional[socket.socket] = None,
         line.extend(chunk)
         if chunk == b'\n':
             break
-    if not line or not line.endswith(b'\n') or len(line) > MAX_LINE_BYTES:
-        raise CLIError('Guest relay returned a missing, oversized or unterminated response.')
+    if not line:
+        # The relay can close before the guest listener is ready; let the readiness loop retry.
+        raise ConnectionError('Guest relay closed before returning a response.')
+    if not line.endswith(b'\n') or len(line) > MAX_LINE_BYTES:
+        raise CLIError('Guest relay returned an oversized or unterminated response.')
     return bytes(line)
 
 

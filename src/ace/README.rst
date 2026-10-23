@@ -189,7 +189,15 @@ The returned record explicitly has ``attestation_verified: false``.
 
 The default launch timeout is 120 seconds; destroy defaults to 30 seconds.
 Both accept ``--timeout``. Process recovery/cleanup has additional bounded
-grace periods. Preserve the supervisor until destroy; it is not a systemd
+grace periods. The guest listener may not be ready immediately after
+``ResumeVM``: empty relay closures and socket errors are retried within the
+launch timeout. Partial/oversized lines, rejected handshakes, invalid JSON,
+and invalid SNP report shapes still fail explicitly. If readiness times out,
+inspect ``com1.log`` for guest boot/application errors as well as
+``openvmm.log``; successful RPC creation/resume alone does not prove guest
+readiness.
+
+Preserve the supervisor until destroy; it is not a systemd
 service and does not automatically restart instances after host reboot.
 
 Each instance directory retains ``instance.json``, runtime/process identity
