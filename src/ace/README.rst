@@ -36,17 +36,143 @@ package check. First verify equivalent SNP IGVM RPC support and below-4-GiB
 ECAM placement. Unpatched upstream 0.2.0/main snapshots inspected for these
 notes do not select low ECAM in RPC. This switch does not fix that mismatch.
 
-Usage
------
+Development setup with azdev and sudo
+------------------------------------
 
-After installing the extension and its Python dependencies in the appropriate
-Azure CLI environment, run on L1::
+Use one dedicated Python environment for azdev, Azure CLI, ACE, and its
+dependencies. Run setup as your normal user; invoke that environment's
+``az`` by absolute path under sudo. Plain ``sudo az`` may select the
+distribution CLI instead, which has different dependencies and configuration.
+There is no need for a separate ``sudo azdev extension add``.
 
-    sudo az ace launch --name demo \
-        --igvm /home/user/skr-bvt/skr-bvt.igvm \
+These commands assume Python 3.12 with pip/venv support, git, sudo, and an
+existing checkout containing this ACE implementation on L1. Adjust ``ACE_REPO``
+and ``IGVM`` to your paths. Do not clone a stock checkout that lacks ACE::
+
+    export ACE_REPO="$HOME/azure-cli-extensions"
+    export ACE_VENV="$HOME/.venvs/ace-dev"
+    export IGVM="$HOME/skr-bvt/skr-bvt.igvm"
+
+    test -f "$ACE_REPO/src/ace/setup.py"
+    test -f "$IGVM"
+    python3.12 -m venv "$ACE_VENV"
+    source "$ACE_VENV/bin/activate"
+    python -m pip install azdev
+
+Use dedicated development configuration and extension directories, avoiding
+your normal Azure credentials/configuration and root's default extension
+directory. Keep these exports in each shell used for this workflow::
+
+    export AZURE_CONFIG_DIR="$ACE_VENV/azure-config"
+    export AZURE_EXTENSION_DIR="$ACE_VENV/extensions"
+    mkdir -p "$AZURE_CONFIG_DIR" "$AZURE_EXTENSION_DIR"
+    chmod 700 "$AZURE_CONFIG_DIR" "$AZURE_EXTENSION_DIR"
+
+    azdev setup --cli pypi --repo "$ACE_REPO"
+    azdev extension add ace
+
+Ensure the dependencies declared by ACE's ``setup.py`` are installed in that
+same environment. The explicit editable install also refreshes dependencies
+after ``setup.py`` changes; it does not install into the system Python::
+
+    python -m pip install --no-build-isolation \
+        --config-settings editable_mode=compat -e "$ACE_REPO/src/ace"
+    "$ACE_VENV/bin/python" -c \
+        'import grpc; import google.protobuf; import azext_ace; print("ACE and RPC dependencies import successfully")'
+    "$ACE_VENV/bin/az" ace launch --help
+
+Check root can discover ACE and import dependencies using the exact same
+interpreter and development configuration::
+
+    sudo "$ACE_VENV/bin/python" -c \
+        'import grpc; import google.protobuf; import azext_ace; print("Root can import ACE and RPC dependencies")'
+    sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
+        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
+        "$ACE_VENV/bin/az" ace launch --help
+
+azdev records source-extension discovery in the development configuration.
+Passing both directories preserves that discovery under sudo; using the
+absolute virtual-environment executable preserves Python dependencies.
+``AZURE_EXTENSION_DIR`` is an extension container directory, not
+``src/ace`` itself. Do not use the entire repository's ``src`` directory as
+an extension container for this workflow.
+
+This executes the editable checkout and environment as root. Use only trusted
+code/dependencies, and do not run it from directories writable by untrusted
+users. The shared configuration is for this development workflow only; no
+Azure login is required by these local lifecycle commands. Do not update or
+remove the environment/checkout while its supervisor is managing an instance.
+
+Returning to the environment for future testing
+----------------------------------------------
+
+After opening a new terminal, reconnecting over SSH, or rebooting L1,
+reactivate the existing environment and restore the shell variables. Use the
+same paths as the initial setup; do not recreate the virtual environment::
+
+    export ACE_REPO="$HOME/azure-cli-extensions"
+    export ACE_VENV="$HOME/.venvs/ace-dev"
+    export IGVM="$HOME/skr-bvt/skr-bvt.igvm"
+    source "$ACE_VENV/bin/activate"
+    export AZURE_CONFIG_DIR="$ACE_VENV/azure-config"
+    export AZURE_EXTENSION_DIR="$ACE_VENV/extensions"
+
+    sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
+        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
+        "$ACE_VENV/bin/az" ace launch --help
+
+Then use the launch/destroy commands below. Installed packages and azdev
+registration persist, so there is no need to rerun ``azdev setup`` or
+``azdev extension add ace`` for each session. Python source edits are picked
+up by new CLI invocations through the editable install. If dependencies or
+packaging metadata change, repeat the editable install from the setup section
+after stopping any managed instance.
+
+When finished, stop any test instance with destroy before leaving the
+environment::
+
+    deactivate
+
+Deactivation only changes the current shell; it does not stop a running VM or
+its supervisor. Reactivating the environment after an L1 reboot does not
+restart previous VMs. Choose a new instance name for each new launch.
+
+Launch and destroy on L1
+------------------------
+
+With the variables above still set, launch the existing BVT image::
+
+    sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
+        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
+        "$ACE_VENV/bin/az" ace launch --name rpc-test-1 \
+        --igvm "$IGVM" \
         --openvmm /usr/bin/openvmm
 
-    sudo az ace destroy --name demo
+    sudo env AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" \
+        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
+        "$ACE_VENV/bin/az" ace destroy --name rpc-test-1
+
+If ``ace`` is not recognized, check the two directory variables and root's
+help command above. If ``grpc`` is missing, check that the absolute
+``$ACE_VENV/bin/az`` executable is used, not ``/usr/bin/az``, and repeat the
+editable install in the virtual environment. Do not use plain ``sudo pip``
+or install a package named ``grpc``; the distribution name is ``grpcio``.
+
+If RPC fails with ``RST_STREAM`` and OpenVMM logs ``malformed authority``,
+ensure the checkout includes the client's ``grpc.default_authority`` option.
+ACE sets the HTTP/2 authority to ``localhost`` while still connecting through
+the instance's Unix socket; this does not open a TCP listener or change the
+VM configuration. An editable install picks up this Python source fix on the
+next invocation. Retry with a new instance name.
+
+For server-side diagnostics, add
+``OPENVMM_LOG=info,openvmm_entry=debug,mesh_rpc=debug,h2=debug`` to the
+``sudo env`` launch command above. OpenVMM uses ``OPENVMM_LOG``, not
+``RUST_LOG``. After launch completes, read the retained log with a separate
+command (substitute the instance name). Escape non-printable characters to
+protect the terminal::
+
+    sudo tail -n 200 -- /var/lib/ace/instances/rpc-test-1/openvmm.log | LC_ALL=C sed -n 'l'
 
 The default state root is ``/var/lib/ace/instances``. It must be owned by root
 with mode 0700. ``--state-dir`` changes it; use the same value for destroy.

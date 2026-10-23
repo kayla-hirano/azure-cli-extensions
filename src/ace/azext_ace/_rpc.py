@@ -46,7 +46,9 @@ class VmClient:
     def __init__(self, path: Path, deadline: float) -> None:
         """Connect to the instance management path without extending the caller's deadline."""
         self.deadline = deadline
-        self.channel = grpc.insecure_channel('unix:' + str(path))
+        # gRPC otherwise derives an encoded socket-path authority that OpenVMM's HTTP/2 server rejects.
+        self.channel = grpc.insecure_channel(
+            'unix:' + str(path), options=(('grpc.default_authority', 'localhost'),))
 
     def __enter__(self) -> 'VmClient':
         """Expose the client for a context-managed group of RPC calls."""

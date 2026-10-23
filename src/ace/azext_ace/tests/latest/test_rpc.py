@@ -57,6 +57,16 @@ class RpcContractTest(unittest.TestCase):
         self.assertEqual(port.name, 'vsock')
         self.assertEqual(port.attached.device.virtio.vsock.socket_path, str(directory / 'vsock.sock'))
 
+    def test_unix_channel_uses_valid_http2_authority(self) -> None:
+        """Keep the socket path out of the authority header rejected by OpenVMM's HTTP/2 server."""
+        path = Path('/var/lib/ace/instances/demo/rpc.sock')
+        with patch('azext_ace._rpc.grpc.insecure_channel') as channel:
+            with _rpc.VmClient(path, time.monotonic() + 5):
+                channel.assert_called_once_with(
+                    'unix:' + str(path),
+                    options=(('grpc.default_authority', 'localhost'),))
+            channel.return_value.close.assert_called_once_with()
+
     def test_real_grpc_round_trip(self):
         """Exercise actual serialization and status handling against a localhost test service."""
         received = []
