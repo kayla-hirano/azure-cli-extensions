@@ -40,7 +40,9 @@ helps['ace create'] = """
         Defaults to the packaged SKR BVT init script; use --init-script to override guest startup.
         Does not compile workloads or dependencies, install tools, or launch a VM.
         Only the final IGVM is published; an existing output is never overwritten.
-        The development profile enables confidential debug; creation does not verify boot or attestation.
+        Guest debugging is disabled by default. --debug enables SNP guest debugging and diagnostic logs.
+        --keep-intermediates independently retains the build workspace.
+        Returns expected SNP launch measurements.
     examples:
       - name: Create an image using the packaged SKR BVT init script.
         text: >
@@ -53,6 +55,10 @@ helps['ace create'] = """
             --init-script /home/user/skr-bvt-init --workspace /home/user/ace-build
             --output-file /home/user/images/signed.igvm --signing-key /home/user/test-id-key.pem
             --keep-intermediates
+      - name: Create a debug-enabled guest image and show diagnostic logs.
+        text: >
+            az ace create --dependency-bundle /opt/ace/dependencies --application /home/user/enclave_app
+            --workspace /home/user/ace-build --output-file /home/user/images/debug.igvm --debug
 """
 
 helps['ace launch'] = """

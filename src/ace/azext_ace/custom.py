@@ -8,6 +8,7 @@
 from pathlib import Path
 from typing import Optional
 
+from azure.cli.core.commands import AzCliCommand
 from knack.log import get_logger
 from knack.util import CLIError
 
@@ -24,13 +25,13 @@ def setup_ace(yes: bool = False) -> dict:
         raise CLIError('Unable to set up ACE host: {}'.format(error)) from error
 
 
-def create_ace(dependency_bundle: str, application: str, workspace: str, output_file: str,
+def create_ace(cmd: AzCliCommand, dependency_bundle: str, application: str, workspace: str, output_file: str,
                init_script: Optional[str] = None, signing_key: Optional[str] = None,
                keep_intermediates: bool = False) -> dict:
     """Compose an IGVM from trusted dependencies and an already-compiled workload."""
     from ._image_builder import IgvmBuildError, build_igvm
     try:
-        image = build_igvm(
+        result = build_igvm(
             dependency_bundle=Path(dependency_bundle),
             application=Path(application),
             init_script=(Path(init_script) if init_script is not None
@@ -39,13 +40,14 @@ def create_ace(dependency_bundle: str, application: str, workspace: str, output_
             output=Path(output_file),
             signing_key=Path(signing_key) if signing_key is not None else None,
             debug=keep_intermediates,
+            enable_debug='--debug' in cmd.cli_ctx.data['safe_params'],
             logger=logger)
     except IgvmBuildError as error:
         detail = 'Unable to create ACE image: {}'.format(error)
         if error.workspace is not None:
             detail += '\nBuild workspace retained at: {}'.format(error.workspace)
         raise CLIError(detail) from error
-    return {'igvm': str(image)}
+    return {'igvm': str(result.igvm), 'measurements': result.measurements}
 
 
 def launch_ace(name: str, igvm: str, openvmm: str = 'openvmm',

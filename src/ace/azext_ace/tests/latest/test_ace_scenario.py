@@ -32,7 +32,7 @@ class AceCommandTest(unittest.TestCase):
         """Keep setup approval and lifecycle options scoped to the appropriate commands."""
         expected = {
             'ace setup': {'yes'},
-            'ace create': {'dependency_bundle', 'application', 'init_script', 'workspace',
+            'ace create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
                            'output_file', 'signing_key', 'keep_intermediates'},
             'ace launch': {'name', 'igvm', 'openvmm', 'state_dir', 'timeout', 'allow_untested_runtime'},
             'ace destroy': {'name', 'state_dir', 'timeout'},
@@ -52,6 +52,8 @@ class AceCommandTest(unittest.TestCase):
         self.assertIn('Root and Azure login are not required.', helps['ace create'])
         self.assertIn('--output-file', helps['ace create'])
         self.assertIn('--keep-intermediates', helps['ace create'])
+        self.assertIn('--debug enables SNP guest debugging and diagnostic logs.', helps['ace create'])
+        self.assertIn('expected SNP launch measurements', helps['ace create'])
         self.assertIn('Azure Linux 3.0 L1', helps['ace setup'])
         for command in ('launch', 'destroy'):
             self.assertIn('Linux L1', helps['ace {}'.format(command)])

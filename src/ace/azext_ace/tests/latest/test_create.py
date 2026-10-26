@@ -6,6 +6,7 @@
 """Exercise CLI image creation and the packaged builder without real SNP dependencies."""
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from azure.cli.core import get_default_cli
+from azure.cli.core import AzCli, MainCommandsLoader, get_default_cli
+from azure.cli.core._help import AzCliHelp
+from azure.cli.core._output import AzOutputProducer
+from azure.cli.core.azlogging import AzCliLogging
+from azure.cli.core.commands import AzCliCommandInvoker
+from azure.cli.core.parser import AzCliCommandParser
 from knack.util import CLIError
 
 from azext_ace import AceCommandsLoader
@@ -26,28 +32,70 @@ from azext_ace import _image_builder as builder
 from azext_ace import custom
 
 
+class AceTestCommandsLoader(MainCommandsLoader):
+    """Load only ACE through the normal Azure CLI main-loader argument wiring."""
+
+    def load_command_table(self, args: list) -> dict:
+        loader = AceCommandsLoader(cli_ctx=self.cli_ctx)
+        self.command_table = loader.load_command_table(args)
+        self.cmd_to_loader_map = {name: [loader] for name in self.command_table}
+        return self.command_table
+
+
 class CreateCommandTest(unittest.TestCase):
     """Check CLI conversion, logging, result shape, and error translation."""
 
+    def setUp(self) -> None:
+        self.cmd = SimpleNamespace(cli_ctx=SimpleNamespace(data={'safe_params': []}))
+        self.measurements = {'snp': 'AB' * 48}
+
     def test_default_delegation(self) -> None:
         image = Path('published.igvm').resolve()
-        with patch.object(builder, 'build_igvm', return_value=image) as build:
-            result = custom.create_ace('bundle', 'app', 'work', 'image.igvm')
-        self.assertEqual(result, {'igvm': str(image)})
+        with patch.object(builder, 'build_igvm',
+                          return_value=builder.IgvmBuildResult(image, self.measurements)) as build:
+            result = custom.create_ace(self.cmd, 'bundle', 'app', 'work', 'image.igvm')
+        self.assertEqual(result, {'igvm': str(image), 'measurements': self.measurements})
         self.assertEqual(json.loads(json.dumps(result)), result)
         build.assert_called_once_with(
             dependency_bundle=Path('bundle'), application=Path('app'),
             init_script=Path(custom.__file__).parent / 'initramfs' / 'skr-bvt-init', workspace=Path('work'),
-            output=Path('image.igvm'), signing_key=None, debug=False,
+            output=Path('image.igvm'), signing_key=None, debug=False, enable_debug=False,
             logger=custom.logger)
 
     def test_signing_and_retention(self) -> None:
-        with patch.object(builder, 'build_igvm', return_value=Path('signed.igvm')) as build:
-            custom.create_ace('bundle', 'app', 'work', 'signed.igvm', init_script='init',
+        with patch.object(builder, 'build_igvm',
+                          return_value=builder.IgvmBuildResult(Path('signed.igvm'), self.measurements)) as build:
+            custom.create_ace(self.cmd, 'bundle', 'app', 'work', 'signed.igvm', init_script='init',
                               signing_key='private.pem', keep_intermediates=True)
         self.assertEqual(build.call_args.kwargs['signing_key'], Path('private.pem'))
         self.assertEqual(build.call_args.kwargs['init_script'], Path('init'))
         self.assertIs(build.call_args.kwargs['debug'], True)
+        self.assertIs(build.call_args.kwargs['enable_debug'], False)
+
+    def test_global_debug_flag_through_cli_invocation(self) -> None:
+        for flags, enable_debug, retain in (
+                ([], False, False),
+                (['--verbose'], False, False),
+                (['--debug'], True, False),
+                (['--keep-intermediates'], False, True),
+                (['--debug', '--keep-intermediates'], True, True)):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
+                cli = AzCli(cli_name='az', config_dir=directory, config_env_var_prefix='AZURE',
+                            commands_loader_cls=AceTestCommandsLoader,
+                            invocation_cls=AzCliCommandInvoker, parser_cls=AzCliCommandParser,
+                            help_cls=AzCliHelp, logging_cls=AzCliLogging, output_cls=AzOutputProducer)
+                output = io.StringIO()
+                with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
+                        Path('image.igvm'), self.measurements)) as build:
+                    code = cli.invoke(
+                        ['ace', 'create', '--dependency-bundle', 'bundle', '--application', 'app',
+                         '--workspace', 'work', '--output-file', 'image.igvm', '--output', 'json'] + flags,
+                        out_file=output)
+                self.assertEqual(code, 0, str(cli.result.error))
+                self.assertEqual(json.loads(output.getvalue()),
+                                 {'igvm': 'image.igvm', 'measurements': self.measurements})
+                self.assertIs(build.call_args.kwargs['enable_debug'], enable_debug)
+                self.assertIs(build.call_args.kwargs['debug'], retain)
 
     def test_build_errors_include_stage_and_retained_workspace(self) -> None:
         for workspace in (None, Path('retained')):
@@ -55,7 +103,7 @@ class CreateCommandTest(unittest.TestCase):
                 error = builder.IgvmBuildError('tool failed', stage='generate-igvm', workspace=workspace)
                 with patch.object(builder, 'build_igvm', side_effect=error):
                     with self.assertRaises(CLIError) as raised:
-                        custom.create_ace('bundle', 'app', 'work', 'image.igvm')
+                        custom.create_ace(self.cmd, 'bundle', 'app', 'work', 'image.igvm')
                 self.assertIn('generate-igvm: tool failed', str(raised.exception))
                 self.assertIs(raised.exception.__cause__, error)
                 self.assertEqual('Build workspace retained at:' in str(raised.exception),
@@ -70,7 +118,8 @@ class CreateCommandTest(unittest.TestCase):
         table['ace create'].load_arguments()
         arguments = table['ace create'].arguments
         required = {'dependency_bundle', 'application', 'workspace', 'output_file'}
-        self.assertEqual({name for name, arg in arguments.items() if arg.options.get('required')}, required)
+        self.assertEqual({name for name, arg in arguments.items()
+                          if arg.options.get('required') and name != 'cmd'}, required)
         self.assertEqual(arguments['output_file'].options_list, ['--output-file'])
         self.assertEqual(arguments['keep_intermediates'].options_list, ['--keep-intermediates'])
         self.assertEqual(arguments['keep_intermediates'].options['action'], 'store_true')
@@ -82,8 +131,9 @@ class CreateCommandTest(unittest.TestCase):
         self.assertTrue(script.startswith(b'#!/bin/sh\n'))
         self.assertNotIn(b'\r', script)
         self.assertIn(b'exec /bin/enclave_app serve-vsock 4050\n', script)
-        with patch.object(builder, 'build_igvm', return_value=Path('image.igvm')) as build:
-            custom.create_ace('bundle', 'app', 'work', 'image.igvm')
+        with patch.object(builder, 'build_igvm',
+                          return_value=builder.IgvmBuildResult(Path('image.igvm'), self.measurements)) as build:
+            custom.create_ace(self.cmd, 'bundle', 'app', 'work', 'image.igvm')
         self.assertEqual(build.call_args.kwargs['init_script'], default_init)
 
 
@@ -112,9 +162,13 @@ class ImageBuilderTest(unittest.TestCase):
         }
         config = {
             'guest_arch': 'x64',
-            'guest_configs': [{'image': {'snp_linux_direct': {
-                'pcie_host_bridge': {'segment': 0}}}}],
+            'guest_configs': [{
+                'isolation_type': {'snp': {'enable_debug': True}},
+                'image': {'snp_linux_direct': {'pcie_host_bridge': {'segment': 0}}},
+            }],
         }
+        self.measurement = 'AB' * 48
+        self.measurement_document = {'series': [{'reference': {'snp_ld': self.measurement}}]}
         for name, data in (
                 ('kernel', b'kernel'), ('base_initrd', b'base-initrd'),
                 ('snp_bootshim', b'bootshim'), ('igvmfilegen', b'generator'),
@@ -171,6 +225,7 @@ class ImageBuilderTest(unittest.TestCase):
             })
             (work / 'image.igvm').write_bytes(b'unsigned image')
             (work / 'image-snp.idblock').write_bytes(b'id block')
+            (work / 'image-snp.json').write_text(json.dumps(self.measurement_document), encoding='utf-8')
         elif stage == 'export-id-public-key':
             Path(argv[argv.index('-out') + 1]).write_bytes(b'public key')
         elif stage == 'sign-id-block':
@@ -180,13 +235,15 @@ class ImageBuilderTest(unittest.TestCase):
         else:
             self.fail('Unexpected stage: ' + stage)
 
-    def build(self, **kwargs) -> Path:
+    def build(self, **kwargs) -> builder.IgvmBuildResult:
         return builder.build_igvm(
             dependency_bundle=self.bundle, application=self.application,
             init_script=self.init, workspace=self.workspace, output=self.output, **kwargs)
 
     def test_unsigned_pipeline_and_cleanup(self) -> None:
-        self.assertEqual(self.build(), self.output)
+        result = self.build()
+        self.assertEqual(result.igvm, self.output)
+        self.assertEqual(result.measurements, {'snp': self.measurement})
         self.assertEqual(self.output.read_bytes(), b'unsigned image')
         self.assertEqual(list(self.workspace.iterdir()), [])
         self.assertEqual(list(self.output.parent.iterdir()), [self.output])
@@ -210,7 +267,8 @@ class ImageBuilderTest(unittest.TestCase):
         self.assertTrue((work / 'generate-igvm.log').is_file())
 
     def test_signed_image_only_and_private_key_not_copied(self) -> None:
-        self.build(signing_key=self.key, debug=True)
+        result = self.build(signing_key=self.key, debug=True)
+        self.assertEqual(result.measurements, {'snp': self.measurement})
         self.assertEqual(self.output.read_bytes(), b'signed image')
         work, = self.workspace.iterdir()
         self.assertEqual(self.stages[-3:], [
@@ -219,6 +277,61 @@ class ImageBuilderTest(unittest.TestCase):
         self.assertFalse(any(path.is_file() and path.read_bytes() == self.key.read_bytes()
                              for path in work.rglob('*')))
         self.assertEqual(self.key.read_bytes(), b'caller-owned-test-key')
+
+    def test_guest_debug_is_independent_of_retention_and_bundle(self) -> None:
+        original = (self.bundle / 'igvm_manifest').read_bytes()
+        for enable_debug in (False, True):
+            with self.subTest(enable_debug=enable_debug):
+                previous = set(self.workspace.iterdir()) if self.workspace.exists() else set()
+                result = self.build(enable_debug=enable_debug, debug=True)
+                work, = set(self.workspace.iterdir()) - previous
+                config = json.loads((work / 'igvm-manifest.json').read_text(encoding='utf-8'))
+                self.assertIs(config['guest_configs'][0]['isolation_type']['snp']['enable_debug'],
+                              enable_debug)
+                self.assertEqual((self.bundle / 'igvm_manifest').read_bytes(), original)
+                self.assertEqual(result.measurements, {'snp': self.measurement})
+                self.output.unlink()
+
+    def test_default_disables_guest_debug_from_bundle(self) -> None:
+        self.build(debug=True)
+        work, = self.workspace.iterdir()
+        config = json.loads((work / 'igvm-manifest.json').read_text(encoding='utf-8'))
+        self.assertIs(config['guest_configs'][0]['isolation_type']['snp']['enable_debug'], False)
+
+    def test_invalid_measurements_fail_before_publication(self) -> None:
+        for document in (
+                {}, {'series': []}, {'series': [None]}, {'series': [{}, {}]},
+                {'series': [{'reference': None}]},
+                {'series': [{'reference': {'snp_ld': None}}]},
+                {'series': [{'reference': {'snp_ld': 'AB' * 47}}]},
+                {'series': [{'reference': {'snp_ld': 'ZZ' * 48}}]},
+                {'series': [{'reference': {'snp_ld': 'AB' * 47 + '  '}}]}):
+            with self.subTest(document=document):
+                self.measurement_document = document
+                with self.assertRaises(builder.IgvmBuildError) as raised:
+                    self.build()
+                self.assertEqual(raised.exception.stage, 'read-measurements')
+                self.assertFalse(self.output.exists())
+                self.assertEqual(list(self.workspace.iterdir()), [])
+
+    def test_missing_or_invalid_json_measurements_retain_evidence(self) -> None:
+        for data in (None, b'{invalid json', b'[]'):
+            with self.subTest(data=data):
+                def generate(argv, stage, work, **kwargs) -> None:
+                    self.run_stage(argv, stage, work, **kwargs)
+                    if stage == 'generate-igvm':
+                        sidecar = work / 'image-snp.json'
+                        if data is None:
+                            sidecar.unlink()
+                        else:
+                            sidecar.write_bytes(data)
+
+                self.run.side_effect = generate
+                with self.assertRaises(builder.IgvmBuildError) as raised:
+                    self.build(debug=True)
+                self.assertEqual(raised.exception.stage, 'read-measurements')
+                self.assertTrue(raised.exception.workspace.is_dir())
+                self.assertFalse(self.output.exists())
 
     def test_failure_cleanup_and_retention(self) -> None:
         for debug in (False, True):
@@ -310,7 +423,8 @@ class ImageBuilderTest(unittest.TestCase):
     def test_non_linux_failure_is_a_cli_error(self) -> None:
         with patch.object(builder.sys, 'platform', 'win32'):
             with self.assertRaisesRegex(CLIError, 'validate: IGVM packaging requires Linux'):
-                custom.create_ace(str(self.bundle), str(self.application),
+                cmd = SimpleNamespace(cli_ctx=SimpleNamespace(data={'safe_params': []}))
+                custom.create_ace(cmd, str(self.bundle), str(self.application),
                                   str(self.workspace), str(self.output), init_script=str(self.init))
         self.run.assert_not_called()
 
@@ -340,14 +454,20 @@ class LinuxPackagingTest(unittest.TestCase):
         generator.write_text(
             '#!/usr/bin/env python3\n'
             'from pathlib import Path\n'
+            'import json\n'
             'import sys\n'
-            'Path(sys.argv[sys.argv.index("--output") + 1]).write_bytes(b"test IGVM")\n',
+            'image = Path(sys.argv[sys.argv.index("--output") + 1])\n'
+            'image.write_bytes(b"test IGVM")\n'
+            'image.with_name(image.stem + "-snp.json").write_text(json.dumps({\n'
+            '    "series": [{"reference": {"snp_ld": "AB" * 48}}]}))\n',
             encoding='utf-8')
         generator.chmod(0o755)
         for name in ('base_initrd', 'igvmfilegen'):
             fixture.manifest['artifacts'][name]['sha256'] = hashlib.sha256(
                 (fixture.bundle / name).read_bytes()).hexdigest()
         fixture.write_manifest()
-        self.assertEqual(fixture.build(), fixture.output)
+        result = fixture.build()
+        self.assertEqual(result.igvm, fixture.output)
+        self.assertEqual(result.measurements, {'snp': fixture.measurement})
         self.assertEqual(fixture.output.read_bytes(), b'test IGVM')
         self.assertEqual(list(fixture.workspace.iterdir()), [])

@@ -22,10 +22,17 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import BinaryIO, Dict, List, Optional, Sequence
+from typing import BinaryIO, Dict, List, NamedTuple, Optional, Sequence
 
 
-__all__ = ["IgvmBuildError", "build_igvm"]
+__all__ = ["IgvmBuildError", "IgvmBuildResult", "build_igvm"]
+
+
+class IgvmBuildResult(NamedTuple):
+    """Published image and expected measurements, not attestation evidence."""
+
+    igvm: Path
+    measurements: Dict[str, str]
 
 
 class IgvmBuildError(RuntimeError):
@@ -60,6 +67,22 @@ def _read_json(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError("Expected a JSON object: {}".format(path))
     return value
+
+
+def _snp_measurement(image: Path) -> str:
+    document = _read_json(_input_file(
+        image.with_name(image.stem + "-snp.json")))
+    series = document.get("series")
+    if (not isinstance(series, list) or len(series) != 1
+            or not isinstance(series[0], dict)):
+        raise ValueError("Expected one SNP launch measurement")
+    reference = series[0].get("reference")
+    digest = reference.get("snp_ld") if isinstance(reference, dict) else None
+    if (not isinstance(digest, str) or len(digest) != 96
+            or len(bytes.fromhex(digest)) != 48):
+        raise ValueError(
+            "Expected a 48-byte hexadecimal SNP launch measurement")
+    return digest
 
 
 def _dependencies(bundle: Path) -> Dict[str, Path]:
@@ -256,7 +279,7 @@ def _compose_initrd(
     with listing.open("rb") as source, composed.open("wb") as output:
         _run(
             ["cpio", "--null", "--create", "--format=newc",
-             "--owner=0:0", "--quiet"],
+             "--owner=0:0", "--renumber-inodes", "--ignore-devno", "--quiet"],
             "pack-cpio", work, cwd=root, stdin=source, stdout=output,
             logger=logger)
     result = work / "application-initrd.cpio.gz"
@@ -303,15 +326,17 @@ def build_igvm(
     output: Path,
     signing_key: Optional[Path] = None,
     debug: bool = False,
+    enable_debug: bool = False,
     logger: Optional[logging.Logger] = None,
-) -> Path:
+) -> IgvmBuildResult:
     """Build one IGVM without compiling dependencies or changing inputs.
 
     ``application`` is an ELF64 x86-64 executable without PT_INTERP (including
     static PIE). This is a basic format check, not a complete ABI verifier.
-    ``init_script`` is the caller's LF-terminated shebang script; it owns mounts
-    and arguments and must ultimately execute /bin/enclave_app. The BVT caller
-    supplies initramfs/skr-bvt-init. No app arguments are generic defaults.
+    ``init_script`` is the caller's LF-terminated shebang script; it owns
+    mounts and arguments and must ultimately execute /bin/enclave_app.
+    The BVT caller supplies initramfs/skr-bvt-init.
+    No app arguments are generic defaults.
 
     With ``signing_key=None``, no SNP ID block is embedded. Otherwise,
     ``signing_key`` is the caller's PEM ECDSA P-384 private key with no
@@ -330,7 +355,13 @@ def build_igvm(
     An optional caller-configured ``logger`` receives INFO progress and DEBUG
     log paths. Tool output stays in stage files; no handlers are installed.
     ``debug`` controls workspace retention, not the logging level.
+    ``enable_debug`` controls SNP guest debugging, defaulting to disabled
+    regardless of the dependency bundle's setting.
 
+    Returns the image path and expected SNP launch measurement from the
+    generator's JSON sidecar. This is not an attestation report or
+    verification.
+    Missing or malformed measurements fail the build before publication.
     Only ``output`` is published. Its parent filesystem must support hard
     links, used to publish a completed file atomically without overwriting.
     Workspace and output may be on different filesystems. No drive is required.
@@ -384,7 +415,14 @@ def build_igvm(
 
         stage = "generate-igvm"
         manifest = work / "igvm-manifest.json"
-        shutil.copyfile(dependencies["igvm_manifest"], manifest)
+        config = _read_json(dependencies["igvm_manifest"])
+        isolation = config["guest_configs"][0].get("isolation_type")
+        snp = isolation.get("snp") if isinstance(isolation, dict) else None
+        if not isinstance(snp, dict):
+            raise ValueError("IGVM manifest is missing SNP isolation settings")
+        snp["enable_debug"] = enable_debug
+        manifest.write_text(json.dumps(config, indent=2) + "\n",
+                            encoding="utf-8")
         resources = work / "resources.json"
         resources.write_text(json.dumps({
             "resources": {
@@ -403,6 +441,9 @@ def build_igvm(
                 or generated.stat().st_size == 0):
             raise IgvmBuildError(
                 "igvmfilegen did not produce a nonempty IGVM", stage=stage)
+
+        stage = "read-measurements"
+        measurements = {"snp": _snp_measurement(generated)}
 
         if key is not None:
             stage = "sign-id-block"
@@ -436,7 +477,7 @@ def build_igvm(
         os.link(staged_output, result)
         if logger is not None:
             logger.info("Created IGVM: %s", result)
-        return result
+        return IgvmBuildResult(result, measurements)
     except IgvmBuildError as error:
         failure = error
         if debug:
