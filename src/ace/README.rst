@@ -157,6 +157,35 @@ Always destroy test instances
 before running ``deactivate``: leaving the shell does not stop them, and a host
 reboot does not automatically restart them.
 
+Processes and connections
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The launching CLI starts a detached Python supervisor, which starts OpenVMM
+as its child. Both outlive the CLI command::
+
+    az ace launch / destroy -- gRPC via rpc.sock --> OpenVMM
+    az ace launch ---------- CONNECT via vsock.sock --> guest app, port 4050
+    supervisor <------------ COM1 via serial.sock ---- OpenVMM
+        |
+        +-- owns and reaps the OpenVMM child
+
+These are three separate local Unix-socket connections:
+
+* ``rpc.sock`` carries management RPCs, not application requests. Closing
+  the CLI's gRPC channel does not stop OpenVMM.
+* ``vsock.sock`` is OpenVMM's guest relay. Launch sends ``CONNECT 4050``,
+  waits for ``OK``, then exchanges a newline-delimited JSON request and
+  response with the enclave application.
+* ``serial.sock`` is the supervisor's listener for OpenVMM's COM1 connection.
+  The supervisor writes guest serial output to ``com1.log`` and directs
+  OpenVMM stdout/stderr to ``openvmm.log``. Its own output goes to
+  ``supervisor.log``.
+
+A host-wide lock permits only one ACE-managed runtime. Its descriptor is
+inherited by the supervisor and OpenVMM, so the lock remains held while
+either process survives the CLI. A separate per-instance lock prevents
+concurrent commands from managing the same instance.
+
 User and root CLI configuration
 -------------------------------
 
@@ -210,3 +239,88 @@ been removed. Choose a destination that does not already exist::
 Keep the original ACE directory root-owned and private; do not change its
 permissions to gain access. The user-owned copy is a results archive, not a
 relocatable or resumable ACE instance.
+
+Testing using a wheel (.whl)
+---------------------------
+
+Install a trusted ACE wheel to use or test a packaged version of the
+extension. The target host does not need a development venv, azdev or a
+source checkout. This tests the packaged artifact rather than editable
+source; it does not change ACE's prototype status or attestation limitations.
+
+Build the wheel on the development machine using the venv/azdev setup above::
+
+    azdev extension build ace
+
+Copy the resulting ``.whl`` to the target host.
+
+To test the wheel on the same machine as the development venv, first stop
+any ACE-managed instance. Open a separate shell without sourcing the
+development activation script (or run ``deactivate`` and
+``unset AZURE_CONFIG_DIR AZURE_EXTENSION_DIR``), then use the standard
+system-installed ``az``, not ``$ACE_VENV/bin/az``. Check ``az --version``
+and ``sudo az --version`` to confirm the Python locations. Keep the venv
+and its editable extension intact. The user and root CLI configurations
+used for wheel testing must not register ACE through
+``extension.dev_sources``, which can override the installed wheel. If they
+do, select separate wheel-testing configuration and extension directories
+with ``AZURE_CONFIG_DIR`` and ``AZURE_EXTENSION_DIR`` on every installation
+and test command, including explicitly through ``sudo env`` for root.
+Return to editable development by sourcing the venv's ``activate-ace.sh``
+again after stopping the wheel-tested instance.
+
+Setup, launch and destroy require Azure Linux 3.0 L1 with a compatible
+kernel exposing ``/dev/mshv``, sudo access, and a standard Azure CLI installation available
+to both your normal user and root. Image creation also requires GNU cpio
+and gzip. No Azure login is required for these local ACE commands.
+
+If Azure CLI is not installed outside the development venv, install it
+system-wide on Azure Linux using tdnf, from a shell outside the venv::
+
+    sudo tdnf install ca-certificates
+    sudo tdnf install azure-cli
+    hash -r
+
+This installs the standard ``az`` command for normal-user and sudo use;
+it does not modify the development venv. See the
+`Azure CLI installation instructions for Azure Linux
+<https://learn.microsoft.com/cli/azure/install-azure-cli-linux?view=azure-cli-latest&pivots=tdnf>`_
+for details.
+
+Verify that both invocations select the intended standard CLI installation::
+
+    az --version
+    sudo az --version
+
+Install the wheel separately for your normal user and root, adjusting the
+filename to match the artifact you copied::
+
+    export ACE_WHEEL="$HOME/dist/ace-0.1.0-py3-none-any.whl"
+    az extension add --source "$ACE_WHEEL"
+    sudo az extension add --source "$ACE_WHEEL"
+    az ace --help
+    sudo az ace --help
+
+The normal-user installation supports image creation; root's installation
+supports setup, launch and destroy. If ACE is already installed, stop any
+managed instances before replacing it and use ``--upgrade`` with the
+extension installation commands.
+
+Prepare OpenVMM::
+
+    sudo az ace setup
+
+Approve installation if prompted. Setup verifies the supported OpenVMM
+package; it does not install a compatible kernel or reboot.
+
+Create an image as your normal user, or skip this step if you copied a
+prepared image::
+
+    az ace create \
+        --workspace "$HOME/ace-build" \
+        --output-file "$HOME/ace-artifacts/enclave.igvm"
+
+Launch the image, then destroy the instance when finished::
+
+    sudo az ace launch --name test-1 --igvm "$HOME/ace-artifacts/enclave.igvm"
+    sudo az ace destroy --name test-1
