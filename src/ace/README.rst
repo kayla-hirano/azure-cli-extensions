@@ -258,21 +258,9 @@ To test the wheel on the same machine as the development venv, first stop
 any ACE-managed instance. Open a separate shell without sourcing the
 development activation script (or run ``deactivate`` and
 ``unset AZURE_CONFIG_DIR AZURE_EXTENSION_DIR``), then use the standard
-system-installed ``az``, not ``$ACE_VENV/bin/az``. Check ``az --version``
-and ``sudo az --version`` to confirm the Python locations. Keep the venv
-and its editable extension intact. The user and root CLI configurations
-used for wheel testing must not register ACE through
-``extension.dev_sources``, which can override the installed wheel. If they
-do, select separate wheel-testing configuration and extension directories
-with ``AZURE_CONFIG_DIR`` and ``AZURE_EXTENSION_DIR`` on every installation
-and test command, including explicitly through ``sudo env`` for root.
+system-installed ``az``, not ``$ACE_VENV/bin/az``.
 Return to editable development by sourcing the venv's ``activate-ace.sh``
 again after stopping the wheel-tested instance.
-
-Setup, launch and destroy require Azure Linux 3.0 L1 with a compatible
-kernel exposing ``/dev/mshv``, sudo access, and a standard Azure CLI installation available
-to both your normal user and root. Image creation also requires GNU cpio
-and gzip. No Azure login is required for these local ACE commands.
 
 If Azure CLI is not installed outside the development venv, install it
 system-wide on Azure Linux using tdnf, from a shell outside the venv::
