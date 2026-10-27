@@ -32,7 +32,7 @@ class AceCommandTest(unittest.TestCase):
         """Keep setup approval and lifecycle options scoped to the appropriate commands."""
         expected = {
             'ace setup': {'yes'},
-            'ace create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
+            'ace create': {'cmd', 'dependency_bundle', 'init_script', 'workspace',
                            'output_file', 'signing_key', 'keep_intermediates'},
             'ace launch': {'name', 'igvm', 'openvmm', 'state_dir', 'timeout', 'allow_untested_runtime'},
             'ace destroy': {'name', 'state_dir', 'timeout'},
@@ -80,6 +80,35 @@ class AceCommandTest(unittest.TestCase):
         with patch('azext_ace._setup.setup_host', side_effect=OSError('cannot read os-release')):
             with self.assertRaisesRegex(CLIError, 'Unable to set up ACE host.*cannot read os-release'):
                 custom.setup_ace()
+
+    def test_lifecycle_results_hide_internal_state_without_mutating_it(self) -> None:
+        for operation, status in (('launch', 'running'), ('destroy', 'destroyed')):
+            with self.subTest(operation=operation):
+                supervisor = {'pid': 123, 'start': '456', 'boot': 'boot-id', 'command': 'command-hash'}
+                public = {
+                    'schema': 1, 'name': 'demo', 'status': status, 'igvm': 'demo.igvm',
+                    'igvm_sha256': 'image-hash',
+                    'vsock': {'port': 4050, 'socket': 'vsock.sock'},
+                    'rpc_socket': 'rpc.sock',
+                    'logs': {'openvmm': 'openvmm.log', 'supervisor': 'supervisor.log', 'com1': 'com1.log'},
+                    'instance_file': 'instance.json', 'response_file': 'response.json',
+                }
+                state = dict(public, attestation_verified=False, directory='instance-directory',
+                             openvmm='openvmm', openvmm_sha256='runtime-hash', supervisor=supervisor)
+                original = state.copy()
+                with patch('azext_ace._lifecycle.' + operation, return_value=state):
+                    result = (custom.launch_ace('demo', 'demo.igvm') if operation == 'launch'
+                              else custom.destroy_ace('demo'))
+                self.assertEqual(result, dict(public, supervisor_pid=123))
+                self.assertEqual(state, original)
+                self.assertIsNot(result, state)
+                self.assertEqual(state['supervisor'], supervisor)
+
+    def test_instance_result_without_supervisor(self) -> None:
+        for supervisor in ({}, {'supervisor': None}):
+            with self.subTest(supervisor=supervisor):
+                state = dict(supervisor, name='demo', status='destroyed')
+                self.assertEqual(custom._instance_result(state), {'name': 'demo', 'status': 'destroyed'})
 
     def test_setup_preserves_cli_errors(self) -> None:
         """Do not obscure explicit host setup failures with a generic wrapper."""

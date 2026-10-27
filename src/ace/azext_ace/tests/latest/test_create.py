@@ -14,6 +14,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -53,19 +54,19 @@ class CreateCommandTest(unittest.TestCase):
         image = Path('published.igvm').resolve()
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(image, self.measurements)) as build:
-            result = custom.create_ace(self.cmd, 'bundle', 'app', 'work', 'image.igvm')
+            result = custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
         self.assertEqual(result, {'igvm': str(image), 'measurements': self.measurements})
         self.assertEqual(json.loads(json.dumps(result)), result)
         build.assert_called_once_with(
-            dependency_bundle=Path('bundle'), application=Path('app'),
-            init_script=Path(custom.__file__).parent / 'initramfs' / 'skr-bvt-init', workspace=Path('work'),
+            dependency_bundle=Path('bundle'), application=custom.DEFAULT_APPLICATION,
+            init_script=custom.DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init', workspace=Path('work'),
             output=Path('image.igvm'), signing_key=None, debug=False, enable_debug=False,
             logger=custom.logger)
 
     def test_signing_and_retention(self) -> None:
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(Path('signed.igvm'), self.measurements)) as build:
-            custom.create_ace(self.cmd, 'bundle', 'app', 'work', 'signed.igvm', init_script='init',
+            custom.create_ace(self.cmd, 'work', 'signed.igvm', dependency_bundle='bundle', init_script='init',
                               signing_key='private.pem', keep_intermediates=True)
         self.assertEqual(build.call_args.kwargs['signing_key'], Path('private.pem'))
         self.assertEqual(build.call_args.kwargs['init_script'], Path('init'))
@@ -85,17 +86,24 @@ class CreateCommandTest(unittest.TestCase):
                             invocation_cls=AzCliCommandInvoker, parser_cls=AzCliCommandParser,
                             help_cls=AzCliHelp, logging_cls=AzCliLogging, output_cls=AzOutputProducer)
                 output = io.StringIO()
-                with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
+                packaged = Path(directory) / 'dependency-bundle.tar.gz'
+                packaged.write_bytes(b'archive selection fixture')
+                bundle_args = ['--dependency-bundle', 'bundle'] if flags else []
+                with patch.object(custom, 'DEFAULT_DEPENDENCY_BUNDLE', packaged), \
+                        patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                         Path('image.igvm'), self.measurements)) as build:
                     code = cli.invoke(
-                        ['ace', 'create', '--dependency-bundle', 'bundle', '--application', 'app',
-                         '--workspace', 'work', '--output-file', 'image.igvm', '--output', 'json'] + flags,
+                        ['ace', 'create', '--workspace', 'work',
+                         '--output-file', 'image.igvm', '--output', 'json'] + bundle_args + flags,
                         out_file=output)
                 self.assertEqual(code, 0, str(cli.result.error))
                 self.assertEqual(json.loads(output.getvalue()),
                                  {'igvm': 'image.igvm', 'measurements': self.measurements})
                 self.assertIs(build.call_args.kwargs['enable_debug'], enable_debug)
                 self.assertIs(build.call_args.kwargs['debug'], retain)
+                self.assertEqual(build.call_args.kwargs['dependency_bundle'],
+                                 Path('bundle') if flags else packaged)
+                self.assertEqual(build.call_args.kwargs['application'], custom.DEFAULT_APPLICATION)
 
     def test_build_errors_include_stage_and_retained_workspace(self) -> None:
         for workspace in (None, Path('retained')):
@@ -103,7 +111,7 @@ class CreateCommandTest(unittest.TestCase):
                 error = builder.IgvmBuildError('tool failed', stage='generate-igvm', workspace=workspace)
                 with patch.object(builder, 'build_igvm', side_effect=error):
                     with self.assertRaises(CLIError) as raised:
-                        custom.create_ace(self.cmd, 'bundle', 'app', 'work', 'image.igvm')
+                        custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
                 self.assertIn('generate-igvm: tool failed', str(raised.exception))
                 self.assertIs(raised.exception.__cause__, error)
                 self.assertEqual('Build workspace retained at:' in str(raised.exception),
@@ -117,7 +125,7 @@ class CreateCommandTest(unittest.TestCase):
         loader.load_arguments('ace create')
         table['ace create'].load_arguments()
         arguments = table['ace create'].arguments
-        required = {'dependency_bundle', 'application', 'workspace', 'output_file'}
+        required = {'workspace', 'output_file'}
         self.assertEqual({name for name, arg in arguments.items()
                           if arg.options.get('required') and name != 'cmd'}, required)
         self.assertEqual(arguments['output_file'].options_list, ['--output-file'])
@@ -126,15 +134,128 @@ class CreateCommandTest(unittest.TestCase):
         self.assertIs(arguments['keep_intermediates'].options['default'], False)
         self.assertIsNone(arguments['signing_key'].options['default'])
         self.assertIsNone(arguments['init_script'].options['default'])
-        default_init = Path(custom.__file__).parent / 'initramfs' / 'skr-bvt-init'
+        self.assertIsNone(arguments['dependency_bundle'].options['default'])
+        self.assertNotIn('application', arguments)
+        default_init = custom.DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init'
         script = default_init.read_bytes()
         self.assertTrue(script.startswith(b'#!/bin/sh\n'))
         self.assertNotIn(b'\r', script)
         self.assertIn(b'exec /bin/enclave_app serve-vsock 4050\n', script)
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(Path('image.igvm'), self.measurements)) as build:
-            custom.create_ace(self.cmd, 'bundle', 'app', 'work', 'image.igvm')
+            custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
         self.assertEqual(build.call_args.kwargs['init_script'], default_init)
+
+    def test_packaged_bundle_is_selected_when_override_is_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'dependency-bundle.tar.gz'
+            archive.write_bytes(b'archive selection is validated by the builder')
+            with patch.object(custom, 'DEFAULT_DEPENDENCY_BUNDLE', archive), \
+                    patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
+                        Path('image.igvm'), self.measurements)) as build:
+                custom.create_ace(self.cmd, 'work', 'image.igvm')
+            self.assertEqual(build.call_args.kwargs['dependency_bundle'], archive)
+
+    def test_missing_packaged_bundle_has_actionable_override_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / 'dependency-bundle.tar.gz'
+            with patch.object(custom, 'DEFAULT_DEPENDENCY_BUNDLE', archive), \
+                    patch.object(builder, 'build_igvm') as build:
+                with self.assertRaisesRegex(CLIError, 'missing.*--dependency-bundle'):
+                    custom.create_ace(self.cmd, 'work', 'image.igvm')
+            build.assert_not_called()
+
+    def test_real_packaged_inputs_and_default_selection(self) -> None:
+        self.assertEqual(custom.DEFAULT_DEPENDENCY_BUNDLE.name, 'dependencies.tar.gz')
+        self.assertTrue(tarfile.is_tarfile(custom.DEFAULT_DEPENDENCY_BUNDLE))
+        builder._validate_application(custom.DEFAULT_APPLICATION)
+        with tempfile.TemporaryDirectory() as directory:
+            extracted = builder._extract_bundle(custom.DEFAULT_DEPENDENCY_BUNDLE, Path(directory) / 'bundle')
+            dependencies = builder._dependencies(extracted.resolve())
+            self.assertIn('igvmfilegen', dependencies)
+        with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
+                Path('image.igvm'), self.measurements)) as build:
+            custom.create_ace(self.cmd, 'work', 'image.igvm')
+        self.assertEqual(build.call_args.kwargs['dependency_bundle'], custom.DEFAULT_DEPENDENCY_BUNDLE)
+        self.assertEqual(build.call_args.kwargs['application'], custom.DEFAULT_APPLICATION)
+
+    def test_application_override_is_not_a_cli_option(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cli = AzCli(cli_name='az', config_dir=directory, config_env_var_prefix='AZURE',
+                        commands_loader_cls=AceTestCommandsLoader,
+                        invocation_cls=AzCliCommandInvoker, parser_cls=AzCliCommandParser,
+                        help_cls=AzCliHelp, logging_cls=AzCliLogging, output_cls=AzOutputProducer)
+            with patch.object(builder, 'build_igvm') as build, self.assertRaises(SystemExit) as raised:
+                cli.invoke(['ace', 'create', '--workspace', 'work', '--output-file', 'image.igvm',
+                            '--application', 'custom-app'], out_file=io.StringIO())
+            self.assertEqual(raised.exception.code, 2)
+            build.assert_not_called()
+
+    def test_archive_override_is_forwarded_without_requiring_packaged_bundle(self) -> None:
+        with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
+                Path('image.igvm'), self.measurements)) as build:
+            custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='custom.tar.gz')
+        self.assertEqual(build.call_args.kwargs['dependency_bundle'], Path('custom.tar.gz'))
+
+
+class ArchiveExtractionTest(unittest.TestCase):
+    """Reject archive metadata that could write outside the private workspace."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.archive_path = self.root / 'bundle.tar.gz'
+        self.destination = self.root / 'extracted'
+
+    def write_archive(self, members: list) -> None:
+        with tarfile.open(self.archive_path, 'w:gz') as archive:
+            for name, kind in members:
+                member = tarfile.TarInfo(name)
+                member.type = kind
+                member.mode = 0o4755
+                if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                    member.linkname = '../outside'
+                data = b'{}'
+                member.size = len(data) if kind == tarfile.REGTYPE else 0
+                archive.addfile(member, io.BytesIO(data) if member.size else None)
+
+    def test_rejects_escaping_and_platform_specific_paths(self) -> None:
+        for name in ('../outside', '/outside', 'nested/../../outside',
+                     r'..\outside', 'C:/outside', r'C:\outside'):
+            with self.subTest(name=name):
+                self.write_archive([(name, tarfile.REGTYPE)])
+                with self.assertRaisesRegex(ValueError, 'Unsafe dependency archive path'):
+                    builder._extract_bundle(self.archive_path, self.destination)
+                self.assertFalse((self.root / 'outside').exists())
+                self.destination.rmdir()
+
+    def test_rejects_links_and_special_files(self) -> None:
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE,
+                     tarfile.CHRTYPE, tarfile.BLKTYPE):
+            with self.subTest(kind=kind):
+                self.write_archive([('unsafe', kind)])
+                with self.assertRaisesRegex(ValueError, 'only regular files and directories'):
+                    builder._extract_bundle(self.archive_path, self.destination)
+                self.destination.rmdir()
+
+    def test_rejects_duplicate_files_without_overwriting(self) -> None:
+        self.write_archive([('same', tarfile.REGTYPE), ('same', tarfile.REGTYPE)])
+        with self.assertRaises(FileExistsError):
+            builder._extract_bundle(self.archive_path, self.destination)
+        self.assertEqual((self.destination / 'same').read_bytes(), b'{}')
+
+    def test_requires_a_manifest_at_supported_archive_root(self) -> None:
+        self.write_archive([('other', tarfile.REGTYPE)])
+        with self.assertRaisesRegex(ValueError, 'must contain dependency-manifest.v1.json'):
+            builder._extract_bundle(self.archive_path, self.destination)
+
+    @unittest.skipUnless(os.name == 'posix', 'Unix executable and setuid mode semantics')
+    def test_preserves_executability_but_discards_privileged_bits(self) -> None:
+        self.write_archive([('dependency-manifest.v1.json', tarfile.REGTYPE),
+                            ('igvmfilegen', tarfile.REGTYPE)])
+        builder._extract_bundle(self.archive_path, self.destination)
+        self.assertEqual((self.destination / 'igvmfilegen').stat().st_mode & 0o7777, 0o755)
 
 
 class ImageBuilderTest(unittest.TestCase):
@@ -146,6 +267,7 @@ class ImageBuilderTest(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.bundle = self.root / 'bundle'
         self.bundle.mkdir()
+        self.archive_prefix = ''
         self.application = self.root / 'application'
         self.init = self.root / 'init'
         self.init.write_bytes(b'#!/bin/sh\nexec /bin/enclave_app serve-vsock 4050\n')
@@ -218,10 +340,12 @@ class ImageBuilderTest(unittest.TestCase):
             kwargs['stdout'].write(b'composed initrd')
         elif stage == 'generate-igvm':
             resources = json.loads((work / 'resources.json').read_text(encoding='utf-8'))['resources']
+            dependency_root = (self.bundle if self.bundle.is_dir()
+                               else work / 'dependencies' / self.archive_prefix)
             self.assertEqual(resources, {
-                'linux_kernel': str(self.bundle / 'kernel'),
+                'linux_kernel': str(dependency_root / 'kernel'),
                 'linux_initrd': str(work / 'application-initrd.cpio.gz'),
-                'snp_bootshim': str(self.bundle / 'snp_bootshim'),
+                'snp_bootshim': str(dependency_root / 'snp_bootshim'),
             })
             (work / 'image.igvm').write_bytes(b'unsigned image')
             (work / 'image-snp.idblock').write_bytes(b'id block')
@@ -251,6 +375,52 @@ class ImageBuilderTest(unittest.TestCase):
             'unpack-gzip', 'unpack-cpio', 'pack-cpio', 'pack-gzip', 'generate-igvm'])
         self.assertEqual(self.application.read_bytes()[:4], b'\x7fELF')
         self.assertEqual((self.bundle / 'base_initrd').read_bytes(), b'base-initrd')
+
+    def test_archive_bundles_build_and_follow_workspace_retention(self) -> None:
+        directory = self.bundle
+        for prefix, retain in (('', False), ('bundle', True)):
+            with self.subTest(prefix=prefix, retain=retain):
+                archive_path = self.root / 'dependencies.tar.gz'
+                with tarfile.open(archive_path, 'w:gz') as archive:
+                    archive.add(directory, arcname=prefix or '.')
+                self.bundle = archive_path
+                self.archive_prefix = prefix
+                result = self.build(debug=retain)
+                self.assertEqual(result.measurements, {'snp': self.measurement})
+                self.assertEqual(result.igvm, self.output)
+                if retain:
+                    work, = self.workspace.iterdir()
+                    self.assertTrue((work / 'dependencies' / prefix / 'dependency-manifest.v1.json').is_file())
+                else:
+                    self.assertEqual(list(self.workspace.iterdir()), [])
+                self.output.unlink()
+
+    def test_corrupt_archive_fails_before_build_and_retains_debug_workspace(self) -> None:
+        archive_path = self.root / 'broken.tar.gz'
+        archive_path.write_bytes(b'not an archive')
+        self.bundle = archive_path
+        for retain in (False, True):
+            with self.subTest(retain=retain):
+                with self.assertRaises(builder.IgvmBuildError) as raised:
+                    self.build(debug=retain)
+                self.assertEqual(raised.exception.stage, 'extract-dependencies')
+                self.assertFalse(self.output.exists())
+                if retain:
+                    self.assertTrue(raised.exception.workspace.is_dir())
+                else:
+                    self.assertEqual(list(self.workspace.iterdir()), [])
+        self.run.assert_not_called()
+
+    def test_archive_artifact_checksums_are_still_required(self) -> None:
+        (self.bundle / 'kernel').write_bytes(b'tampered kernel')
+        archive_path = self.root / 'tampered.tar.gz'
+        with tarfile.open(archive_path, 'w:gz') as archive:
+            archive.add(self.bundle, arcname='.')
+        self.bundle = archive_path
+        with self.assertRaisesRegex(builder.IgvmBuildError, 'validate-dependencies:.*checksum mismatch'):
+            self.build()
+        self.assertEqual(list(self.workspace.iterdir()), [])
+        self.run.assert_not_called()
 
     def test_retains_composed_rootfs_and_normalized_metadata(self) -> None:
         self.build(debug=True)
@@ -424,8 +594,8 @@ class ImageBuilderTest(unittest.TestCase):
         with patch.object(builder.sys, 'platform', 'win32'):
             with self.assertRaisesRegex(CLIError, 'validate: IGVM packaging requires Linux'):
                 cmd = SimpleNamespace(cli_ctx=SimpleNamespace(data={'safe_params': []}))
-                custom.create_ace(cmd, str(self.bundle), str(self.application),
-                                  str(self.workspace), str(self.output), init_script=str(self.init))
+                custom.create_ace(cmd, str(self.workspace), str(self.output),
+                                  dependency_bundle=str(self.bundle), init_script=str(self.init))
         self.run.assert_not_called()
 
 

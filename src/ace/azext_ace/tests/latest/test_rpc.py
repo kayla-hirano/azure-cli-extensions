@@ -481,12 +481,23 @@ class LifecycleTest(LinuxFilesystemTest):
                 patch('azext_ace._lifecycle.probe_guest') as probe:
             result = _lifecycle.launch('demo', str(self.image))
             self.assertEqual(result['status'], 'running')
+            self.assertEqual(result['name'], 'demo')
+            self.assertEqual(result['vsock'], {
+                'port': 4050, 'socket': str(self.directory / 'vsock.sock'),
+            })
+            self.assertEqual(result['rpc_socket'], str(self.directory / 'rpc.sock'))
+            self.assertEqual(result['logs'], {
+                name: str(self.directory / (name + '.log'))
+                for name in ('openvmm', 'supervisor', 'com1')
+            })
+            self.assertEqual(result['instance_file'], str(self.directory / 'instance.json'))
+            self.assertEqual(result['response_file'], str(self.directory / 'response.json'))
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                              ['CreateVM', 'ResumeVM'])
             probe.assert_called_once()
             self.assertTrue(popen.call_args.kwargs['start_new_session'])
             self.assertEqual(popen.call_args.kwargs['pass_fds'], (47,))
-        self.assertEqual(_instance.read_record(self.directory / 'instance.json')['status'], 'running')
+        self.assertEqual(_instance.read_record(self.directory / 'instance.json'), result)
 
     def test_destroy_teardown_then_quit_and_preserve_image(self):
         """Release the VM before quitting its server while retaining the reusable IGVM."""
@@ -502,6 +513,11 @@ class LifecycleTest(LinuxFilesystemTest):
             stop.assert_called_once()
             host_guard.assert_not_called()
         self.assertEqual(result['status'], 'destroyed')
+        self.assertEqual(result['name'], 'demo')
+        self.assertEqual(result['vsock']['port'], 4050)
+        self.assertEqual(result['logs']['com1'], str(self.directory / 'com1.log'))
+        self.assertEqual(result['response_file'], str(self.directory / 'response.json'))
+        self.assertEqual(_instance.read_record(self.directory / 'instance.json'), result)
         self.assertTrue(self.image.exists())
 
     def test_launch_rejects_busy_host_before_starting_processes(self) -> None:
@@ -547,8 +563,12 @@ class LifecycleTest(LinuxFilesystemTest):
         self.prepare_destroy()
         with patch('azext_ace._lifecycle.alive', return_value=False), \
                 patch('azext_ace._lifecycle._stop_runtime'):
-            self.assertEqual(_lifecycle.destroy('demo')['status'], 'destroyed')
-            self.assertEqual(_lifecycle.destroy('demo')['status'], 'destroyed')
+            first = _lifecycle.destroy('demo')
+            second = _lifecycle.destroy('demo')
+            self.assertEqual(first, second)
+            self.assertEqual(second['status'], 'destroyed')
+            self.assertEqual(second['vsock']['port'], 4050)
+            self.assertEqual(second['logs']['openvmm'], str(self.directory / 'openvmm.log'))
         self.client.call.assert_not_called()
 
     def test_destroy_refuses_mismatched_ownership(self):

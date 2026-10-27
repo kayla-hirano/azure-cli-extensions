@@ -14,6 +14,9 @@ from knack.util import CLIError
 
 
 logger = get_logger(__name__)
+DEPENDENCIES_DIR = Path(__file__).parent / 'dependencies'
+DEFAULT_DEPENDENCY_BUNDLE = DEPENDENCIES_DIR / 'dependencies.tar.gz'
+DEFAULT_APPLICATION = DEPENDENCIES_DIR / 'enclave_app'
 
 
 def setup_ace(yes: bool = False) -> dict:
@@ -25,17 +28,24 @@ def setup_ace(yes: bool = False) -> dict:
         raise CLIError('Unable to set up ACE host: {}'.format(error)) from error
 
 
-def create_ace(cmd: AzCliCommand, dependency_bundle: str, application: str, workspace: str, output_file: str,
-               init_script: Optional[str] = None, signing_key: Optional[str] = None,
+def create_ace(cmd: AzCliCommand, workspace: str, output_file: str,
+               dependency_bundle: Optional[str] = None, init_script: Optional[str] = None,
+               signing_key: Optional[str] = None,
                keep_intermediates: bool = False) -> dict:
-    """Compose an IGVM from trusted dependencies and an already-compiled workload."""
+    """Compose an IGVM from trusted dependencies and the packaged enclave application."""
     from ._image_builder import IgvmBuildError, build_igvm
+    bundle = Path(dependency_bundle).expanduser() if dependency_bundle is not None else DEFAULT_DEPENDENCY_BUNDLE
+    if dependency_bundle is None and not bundle.is_file():
+        raise CLIError(
+            'The packaged dependency bundle is missing at {}. Reinstall the extension, '
+            'or supply --dependency-bundle with a trusted archive '
+            'or bundle directory.'.format(bundle))
     try:
         result = build_igvm(
-            dependency_bundle=Path(dependency_bundle),
-            application=Path(application),
+            dependency_bundle=bundle,
+            application=DEFAULT_APPLICATION,
             init_script=(Path(init_script) if init_script is not None
-                         else Path(__file__).parent / 'initramfs' / 'skr-bvt-init'),
+                         else DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init'),
             workspace=Path(workspace),
             output=Path(output_file),
             signing_key=Path(signing_key) if signing_key is not None else None,
@@ -50,13 +60,22 @@ def create_ace(cmd: AzCliCommand, dependency_bundle: str, application: str, work
     return {'igvm': str(result.igvm), 'measurements': result.measurements}
 
 
+def _instance_result(state: dict) -> dict:
+    """Keep process ownership records internal while exposing the supervisor PID."""
+    excluded = {'attestation_verified', 'directory', 'openvmm', 'openvmm_sha256', 'supervisor'}
+    result = {key: value for key, value in state.items() if key not in excluded}
+    if state.get('supervisor') is not None:
+        result['supervisor_pid'] = state['supervisor']['pid']
+    return result
+
+
 def launch_ace(name: str, igvm: str, openvmm: str = 'openvmm',
                state_dir: str = '/var/lib/ace/instances', timeout: float = 120,
                allow_untested_runtime: bool = False) -> dict:
     """Delegate local RPC launch and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import launch
     try:
-        return launch(name, igvm, openvmm, state_dir, timeout, allow_untested_runtime)
+        return _instance_result(launch(name, igvm, openvmm, state_dir, timeout, allow_untested_runtime))
     except (OSError, ValueError, KeyError) as error:
         raise CLIError('Unable to launch ACE instance: {}'.format(error)) from error
 
@@ -65,6 +84,6 @@ def destroy_ace(name: str, state_dir: str = '/var/lib/ace/instances', timeout: f
     """Delegate instance teardown and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import destroy
     try:
-        return destroy(name, state_dir, timeout)
+        return _instance_result(destroy(name, state_dir, timeout))
     except (OSError, ValueError, KeyError) as error:
         raise CLIError('Unable to destroy ACE instance: {}'.format(error)) from error

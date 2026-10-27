@@ -15,12 +15,13 @@ import hashlib
 import json
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import signal
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 from typing import BinaryIO, Dict, List, NamedTuple, Optional, Sequence
 
@@ -83,6 +84,44 @@ def _snp_measurement(image: Path) -> str:
         raise ValueError(
             "Expected a 48-byte hexadecimal SNP launch measurement")
     return digest
+
+
+def _extract_bundle(archive_path: Path, destination: Path) -> Path:
+    """Unpack regular files only, without trusting archive paths or metadata."""
+    destination.mkdir(mode=0o700)
+    with tarfile.open(str(archive_path), mode="r:*") as archive:
+        for member in archive:
+            relative = PurePosixPath(member.name)
+            if (relative.is_absolute() or ".." in relative.parts
+                    or "\\" in member.name or ":" in member.name):
+                raise ValueError("Unsafe dependency archive path: {}".format(
+                    member.name))
+            if not member.isdir() and not member.isfile():
+                raise ValueError(
+                    "Dependency archives may contain only regular files "
+                    "and directories: {}".format(member.name))
+            target = destination.joinpath(*relative.parts)
+            if member.isdir():
+                target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError("Cannot read dependency archive member: {}"
+                                 .format(member.name))
+            with source, target.open("xb") as output:
+                shutil.copyfileobj(source, output)
+            target.chmod(0o755 if member.mode & 0o111 else 0o644)
+    manifest = "dependency-manifest.v1.json"
+    if (destination / manifest).is_file():
+        return destination
+    children = list(destination.iterdir())
+    if (len(children) == 1 and children[0].is_dir()
+            and (children[0] / manifest).is_file()):
+        return children[0]
+    raise ValueError(
+        "Dependency archive must contain dependency-manifest.v1.json "
+        "at its root or inside one top-level directory")
 
 
 def _dependencies(bundle: Path) -> Dict[str, Path]:
@@ -331,11 +370,16 @@ def build_igvm(
 ) -> IgvmBuildResult:
     """Build one IGVM without compiling dependencies or changing inputs.
 
+    ``dependency_bundle`` is a trusted bundle directory or tar/tar.gz archive.
+    Archives are extracted into the private workspace. Links, special files,
+    duplicate files and unsafe paths are rejected; dependency hashes are
+    checked before executing bundled tools.
+
     ``application`` is an ELF64 x86-64 executable without PT_INTERP (including
     static PIE). This is a basic format check, not a complete ABI verifier.
     ``init_script`` is the caller's LF-terminated shebang script; it owns
     mounts and arguments and must ultimately execute /bin/enclave_app.
-    The BVT caller supplies initramfs/skr-bvt-init.
+    The CLI supplies dependencies/initramfs/skr-bvt-init.
     No app arguments are generic defaults.
 
     With ``signing_key=None``, no SNP ID block is embedded. Otherwise,
@@ -390,7 +434,7 @@ def build_igvm(
                 or result in (app, init, key)
                 or (key is not None and _inside(parent, key))):
             raise ValueError("Workspace/output overlaps a protected input")
-        dependencies = _dependencies(bundle)
+        dependencies = _dependencies(bundle) if bundle.is_dir() else None
         _validate_application(app)
         with init.open("rb") as source:
             entrypoint = source.read()
@@ -405,11 +449,16 @@ def build_igvm(
             if shutil.which(command) is None:
                 raise ValueError("Required command not found: " + command)
 
-        stage = "compose-initrd"
         parent.mkdir(parents=True, exist_ok=True)
         work = Path(tempfile.mkdtemp(prefix="igvm-build-", dir=str(parent)))
         if logger is not None:
             logger.info("Build workspace: %s", work)
+        if dependencies is None:
+            stage = "extract-dependencies"
+            extracted = _extract_bundle(bundle, work / "dependencies")
+            stage = "validate-dependencies"
+            dependencies = _dependencies(extracted)
+        stage = "compose-initrd"
         initrd = _compose_initrd(
             dependencies["base_initrd"], app, init, work, epoch, logger)
 
@@ -483,7 +532,7 @@ def build_igvm(
         if debug:
             error.workspace = work
         raise
-    except (OSError, ValueError, UnicodeError, struct.error) as error:
+    except (OSError, ValueError, UnicodeError, struct.error, tarfile.TarError) as error:
         failure = IgvmBuildError(
             str(error), stage=stage, workspace=work if debug else None)
         raise failure from error

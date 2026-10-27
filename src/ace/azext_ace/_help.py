@@ -33,10 +33,12 @@ helps['ace setup'] = """
 
 helps['ace create'] = """
     type: command
-    short-summary: Package a static workload and init script into an SNP enclave IGVM.
+    short-summary: Package the bundled enclave application and init script into an SNP IGVM.
     long-summary: >
         Run on Linux or WSL with GNU cpio and gzip. Root and Azure login are not required.
-        Uses a trusted measured-pcie-v1 dependency bundle and a precompiled static x86-64 application.
+        Uses a trusted measured-pcie-v1 dependency bundle and the packaged static x86-64 enclave application.
+        Defaults to the packaged dependency archive; --dependency-bundle overrides it with an archive or directory.
+        The application is packaged with the extension; there is no application override option.
         Defaults to the packaged SKR BVT init script; use --init-script to override guest startup.
         Does not compile workloads or dependencies, install tools, or launch a VM.
         Only the final IGVM is published; an existing output is never overwritten.
@@ -46,18 +48,17 @@ helps['ace create'] = """
     examples:
       - name: Create an image using the packaged SKR BVT init script.
         text: >
-            az ace create --dependency-bundle /opt/ace/dependencies --application /home/user/enclave_app
-            --workspace /home/user/ace-build
+            az ace create --workspace /home/user/ace-build
             --output-file /home/user/images/enclave.igvm
-      - name: Override guest startup, sign the SNP ID block, and retain intermediate files.
+      - name: Supply your own bundle, override guest startup, sign, and retain intermediate files.
         text: >
-            az ace create --dependency-bundle /opt/ace/dependencies --application /home/user/enclave_app
+            az ace create --dependency-bundle /opt/ace/dependencies.tar.gz
             --init-script /home/user/skr-bvt-init --workspace /home/user/ace-build
             --output-file /home/user/images/signed.igvm --signing-key /home/user/test-id-key.pem
             --keep-intermediates
       - name: Create a debug-enabled guest image and show diagnostic logs.
         text: >
-            az ace create --dependency-bundle /opt/ace/dependencies --application /home/user/enclave_app
+            az ace create --dependency-bundle /opt/ace/dependencies
             --workspace /home/user/ace-build --output-file /home/user/images/debug.igvm --debug
 """
 
@@ -71,6 +72,7 @@ helps['ace launch'] = """
         Destroy the existing instance before launching another.
         Waits for an SNP-shaped guest response, but does not verify attestation or release keys.
         Logs and instance state remain under the state directory.
+        Returns the enclave name, status, vsock port and relay socket, RPC socket, log paths, and evidence paths.
     examples:
       - name: Launch an existing SKR BVT image on L1.
         text: az ace launch --name demo --igvm /home/user/skr-bvt/skr-bvt.igvm --openvmm /usr/bin/openvmm
@@ -83,6 +85,8 @@ helps['ace destroy'] = """
         Run as root on the same Linux L1 and use the same state directory as launch.
         Tears down the VM through RPC, quits OpenVMM and cleans up owned sockets.
         Preserves the IGVM, logs and instance record. A confirmed destroyed instance can be destroyed again.
+        Returns enclave details and retained log/evidence paths, including for older instance records.
+        Returned socket paths are informational only after destruction; the sockets have been removed.
     examples:
       - name: Destroy a local instance.
         text: az ace destroy --name demo

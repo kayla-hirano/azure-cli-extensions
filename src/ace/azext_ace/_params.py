@@ -11,10 +11,9 @@ def load_arguments(self, _):
         context.argument('yes', options_list=['--yes', '-y'], action='store_true',
                          help='Approve installation of the supported OpenVMM package without prompting.')
     with self.argument_context('ace create') as context:
-        context.argument('dependency_bundle', required=True,
-                         help='Trusted measured-pcie-v1 dependency bundle directory with its artifact manifest.')
-        context.argument('application', required=True,
-                         help='Precompiled static x86-64 ELF executable to install as /bin/enclave_app.')
+        context.argument('dependency_bundle', required=False,
+                         help='Override the packaged dependency bundle with a trusted measured-pcie-v1 '
+                              'tar/tar.gz archive or bundle directory.')
         context.argument('init_script', required=False,
                          help='LF-only guest /init override. Defaults to the packaged SKR BVT script, '
                               'which mounts guest filesystems and starts /bin/enclave_app serve-vsock 4050.')

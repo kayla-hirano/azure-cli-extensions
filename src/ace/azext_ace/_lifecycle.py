@@ -29,6 +29,23 @@ from .rpc import vmservice_pb2 as vm
 
 logger = get_logger(__name__)
 MAX_LINE_BYTES = 4 * 1024 * 1024
+GUEST_VSOCK_PORT = 4050
+
+
+def _instance_info(directory: Path) -> dict:
+    """Describe instance endpoints and retained evidence for both lifecycle commands."""
+    return {
+        'directory': str(directory),
+        'vsock': {'port': GUEST_VSOCK_PORT, 'socket': str(directory / 'vsock.sock')},
+        'rpc_socket': str(directory / 'rpc.sock'),
+        'logs': {
+            'openvmm': str(directory / 'openvmm.log'),
+            'supervisor': str(directory / 'supervisor.log'),
+            'com1': str(directory / 'com1.log'),
+        },
+        'instance_file': str(directory / 'instance.json'),
+        'response_file': str(directory / 'response.json'),
+    }
 
 
 def read_line(stream: BinaryIO, connection: Optional[socket.socket] = None,
@@ -69,7 +86,7 @@ def probe_guest(directory: Path, deadline: float) -> None:
                 connection.connect(str(directory / 'vsock.sock'))
                 with connection.makefile('rwb', buffering=0) as stream:
                     # Same CONNECT handshake and JSON request as skr-bvt-client.py.
-                    stream.write(b'CONNECT 4050\n')
+                    stream.write('CONNECT {}\n'.format(GUEST_VSOCK_PORT).encode('ascii'))
                     if not read_line(stream, connection, deadline).startswith(b'OK '):
                         raise CLIError('OpenVMM rejected the guest relay connection.')
                     stream.write(json.dumps({
@@ -198,6 +215,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
             'openvmm_sha256': executable_digest, 'igvm_sha256': image_digest,
             'attestation_verified': False,
         }
+        state.update(_instance_info(directory))
         write_record(directory / 'instance.json', state)
         try:
             _start_supervisor(directory, state, host_lock_fd)
@@ -232,6 +250,7 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
         state = read_record(directory / 'instance.json')
         if state.get('schema') != 1 or state.get('name') != name:
             raise CLIError('Unsupported or mismatched ACE instance record.')
+        state.update(_instance_info(directory))
         # Match full process identities, not just PIDs, before trusting the management endpoint.
         runtime_path = directory / 'runtime.json'
         runtime = read_record(runtime_path) if runtime_path.exists() else {}

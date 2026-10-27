@@ -59,5 +59,9 @@ setup(
     classifiers=CLASSIFIERS,
     packages=find_packages(),
     install_requires=DEPENDENCIES,
-    package_data={'azext_ace': ['azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi', 'initramfs/skr-bvt-init']},
+    package_data={'azext_ace': [
+        'azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi',
+        'dependencies/dependencies.tar.gz', 'dependencies/enclave_app',
+        'dependencies/initramfs/skr-bvt-init',
+    ]},
 )
