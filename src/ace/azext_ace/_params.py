@@ -14,6 +14,10 @@ def load_arguments(self, _):
         context.argument('dependency_bundle', required=False,
                          help='Override the packaged dependency bundle with a trusted measured-pcie-v1 '
                               'tar/tar.gz archive or bundle directory.')
+        context.argument('application', required=False,
+                         help='Static x86-64 ELF application installed as /bin/enclave_app. '
+                              'Defaults to the application packaged with the extension. '
+                              'Use --init-script if your application needs different startup arguments.')
         context.argument('init_script', required=False,
                          help='LF-only guest /init override. Defaults to the packaged SKR BVT script, '
                               'which mounts guest filesystems and starts /bin/enclave_app serve-vsock 4050.')

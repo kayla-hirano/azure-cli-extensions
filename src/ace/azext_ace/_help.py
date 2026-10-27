@@ -33,12 +33,13 @@ helps['ace setup'] = """
 
 helps['ace create'] = """
     type: command
-    short-summary: Package the bundled enclave application and init script into an SNP IGVM.
+    short-summary: Package an enclave application and init script into an SNP IGVM.
     long-summary: >
         Run on Linux or WSL with GNU cpio and gzip. Root and Azure login are not required.
         Uses a trusted measured-pcie-v1 dependency bundle and the packaged static x86-64 enclave application.
         Defaults to the packaged dependency archive; --dependency-bundle overrides it with an archive or directory.
-        The application is packaged with the extension; there is no application override option.
+        Defaults to the packaged application; --application overrides it with a static x86-64 ELF binary.
+        The application is installed as /bin/enclave_app in the guest.
         Defaults to the packaged SKR BVT init script; use --init-script to override guest startup.
         Does not compile workloads or dependencies, install tools, or launch a VM.
         Only the final IGVM is published; an existing output is never overwritten.
@@ -60,6 +61,11 @@ helps['ace create'] = """
         text: >
             az ace create --dependency-bundle /opt/ace/dependencies
             --workspace /home/user/ace-build --output-file /home/user/images/debug.igvm --debug
+      - name: Package your own enclave application with a matching startup script.
+        text: >
+            az ace create --application /home/user/my-enclave-app
+            --init-script /home/user/my-init --workspace /home/user/ace-build
+            --output-file /home/user/images/custom-app.igvm
 """
 
 helps['ace launch'] = """
@@ -84,6 +90,7 @@ helps['ace destroy'] = """
     long-summary: >
         Run as root on the same Linux L1 and use the same state directory as launch.
         Tears down the VM through RPC, quits OpenVMM and cleans up owned sockets.
+        If Quit loses its reply, an UNAVAILABLE transport error is accepted only after confirming OpenVMM exited.
         Preserves the IGVM, logs and instance record. A confirmed destroyed instance can be destroyed again.
         Returns enclave details and retained log/evidence paths, including for older instance records.
         Returned socket paths are informational only after destruction; the sockets have been removed.

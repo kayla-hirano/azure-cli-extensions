@@ -31,8 +31,8 @@ def setup_ace(yes: bool = False) -> dict:
 def create_ace(cmd: AzCliCommand, workspace: str, output_file: str,
                dependency_bundle: Optional[str] = None, init_script: Optional[str] = None,
                signing_key: Optional[str] = None,
-               keep_intermediates: bool = False) -> dict:
-    """Compose an IGVM from trusted dependencies and the packaged enclave application."""
+               keep_intermediates: bool = False, application: Optional[str] = None) -> dict:
+    """Compose an IGVM from trusted dependencies and a packaged or caller-supplied application."""
     from ._image_builder import IgvmBuildError, build_igvm
     bundle = Path(dependency_bundle).expanduser() if dependency_bundle is not None else DEFAULT_DEPENDENCY_BUNDLE
     if dependency_bundle is None and not bundle.is_file():
@@ -43,7 +43,7 @@ def create_ace(cmd: AzCliCommand, workspace: str, output_file: str,
     try:
         result = build_igvm(
             dependency_bundle=bundle,
-            application=DEFAULT_APPLICATION,
+            application=Path(application).expanduser() if application is not None else DEFAULT_APPLICATION,
             init_script=(Path(init_script) if init_script is not None
                          else DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init'),
             workspace=Path(workspace),

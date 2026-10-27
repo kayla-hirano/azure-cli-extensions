@@ -5,7 +5,7 @@ Azure CLI ACE Extension
 lets you generate launch artifacts with ``az ace create`` or bring your own
 compatible IGVM. ACE is not yet a general-purpose image launcher.
 
-Set up a development environment
+Initial set up for development environment
 -------------------------------
 
 Use Azure Linux 3.0 L1 with a compatible kernel exposing ``/dev/mshv``.
@@ -35,11 +35,6 @@ Then prepare the host::
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
         "$ACE_VENV/bin/az" ace setup
 
-Why sudo? ACE currently requires root for setup, launch, and destroy: setup
-can install system packages, while launch/destroy manage the host's VM
-runtime, access ``/dev/mshv``, and use root-owned instance state. Developer
-bootstrap, image creation, and ordinary help commands do not need sudo.
-
 Always use the virtual environment's absolute ``az`` path under sudo, not
 plain ``sudo az``. This runs your checkout and dependencies as root: use
 trusted code in directories not writable by untrusted users.
@@ -48,7 +43,7 @@ Why separate setup? ``setup.py`` installs Python runtime dependencies with the e
 ``az ace setup`` handles privileged host dependencies, not its own installation.
 Keeping them separate avoids changing your Python environment as root.
 
-Resume testing
+Set up to resume testing
 --------------
 
 In a new terminal or SSH session, restore the same paths and activate the
@@ -63,7 +58,7 @@ Do not remove or update their environment/checkout while they are running.
 Existing environments created without the bootstrap need one bootstrap run
 to generate ``activate-ace.sh``.
 
-Commands
+Extension commands
 --------
 
 Setup
@@ -106,32 +101,21 @@ Optional overrides
 ^^^^^^^^^^^^^^^^^^
 
 Use ``--dependency-bundle`` to supply your own trusted tar/tar.gz archive
-or existing bundle directory instead of the packaged archive::
-
-    "$ACE_VENV/bin/az" ace create \
-        --dependency-bundle "$HOME/ace-inputs/dependencies.tar.gz" \
-        --workspace "$HOME/ace-build" \
-        --output-file "$HOME/images/custom-dependencies.igvm"
-
+or existing bundle directory instead of the packaged archive.
 An archive must contain ``dependency-manifest.v1.json`` and its referenced
-artifacts at the root or inside one top-level directory. Archives are
-extracted into the private workspace. Unsafe paths, links, special files,
-and duplicate files are rejected; artifact hashes are checked before
-executing bundled tools. Inputs are not modified.
+artifacts at the root or inside one top-level directory.
 
 Use ``--init-script`` to override guest startup. The supplied script must
 have a shebang and LF line endings and start the application appropriately.
 Launch expects a compatible application response on guest vsock port 4050.
 
+Use ``--application`` to supply your own static x86-64 ELF binary instead
+of the packaged application. It is installed as ``/bin/enclave_app`` in the
+guest.
+
 Optional ``--signing-key`` requires OpenSSL and an unencrypted PEM ECDSA
 P-384 key. Signing failure never publishes an unsigned fallback. Adding a
-signed SNP ID block does not change the expected launch measurement::
-
-    "$ACE_VENV/bin/az" ace create \
-        --workspace "$HOME/ace-build" \
-        --output-file "$HOME/images/signed.igvm" \
-        --signing-key "$HOME/ace-inputs/id-key.pem" \
-        --keep-intermediates
+signed SNP ID block does not change the expected launch measurement.
 
 Launch
 ~~~~~~
@@ -176,7 +160,10 @@ reboot does not automatically restart them.
 User and root CLI configuration
 -------------------------------
 
-Use sudo for setup, launch, and destroy; run create as your normal user.
+ACE currently requires root for setup, launch, and destroy: setup
+can install system packages, while launch/destroy manage the host's VM
+runtime, access ``/dev/mshv``, and use root-owned instance state. Developer
+bootstrap, image creation, and ordinary help commands do not need sudo.
 All commands use the same virtual environment and extension installation,
 but keep their Azure CLI session files and command logs separate:
 

@@ -32,7 +32,7 @@ class AceCommandTest(unittest.TestCase):
         """Keep setup approval and lifecycle options scoped to the appropriate commands."""
         expected = {
             'ace setup': {'yes'},
-            'ace create': {'cmd', 'dependency_bundle', 'init_script', 'workspace',
+            'ace create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
                            'output_file', 'signing_key', 'keep_intermediates'},
             'ace launch': {'name', 'igvm', 'openvmm', 'state_dir', 'timeout', 'allow_untested_runtime'},
             'ace destroy': {'name', 'state_dir', 'timeout'},

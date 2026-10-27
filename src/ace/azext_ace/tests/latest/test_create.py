@@ -135,7 +135,8 @@ class CreateCommandTest(unittest.TestCase):
         self.assertIsNone(arguments['signing_key'].options['default'])
         self.assertIsNone(arguments['init_script'].options['default'])
         self.assertIsNone(arguments['dependency_bundle'].options['default'])
-        self.assertNotIn('application', arguments)
+        self.assertEqual(arguments['application'].options_list, ['--application'])
+        self.assertIsNone(arguments['application'].options['default'])
         default_init = custom.DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init'
         script = default_init.read_bytes()
         self.assertTrue(script.startswith(b'#!/bin/sh\n'))
@@ -179,17 +180,31 @@ class CreateCommandTest(unittest.TestCase):
         self.assertEqual(build.call_args.kwargs['dependency_bundle'], custom.DEFAULT_DEPENDENCY_BUNDLE)
         self.assertEqual(build.call_args.kwargs['application'], custom.DEFAULT_APPLICATION)
 
-    def test_application_override_is_not_a_cli_option(self) -> None:
+    def test_application_override_through_cli_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cli = AzCli(cli_name='az', config_dir=directory, config_env_var_prefix='AZURE',
                         commands_loader_cls=AceTestCommandsLoader,
                         invocation_cls=AzCliCommandInvoker, parser_cls=AzCliCommandParser,
                         help_cls=AzCliHelp, logging_cls=AzCliLogging, output_cls=AzOutputProducer)
-            with patch.object(builder, 'build_igvm') as build, self.assertRaises(SystemExit) as raised:
-                cli.invoke(['ace', 'create', '--workspace', 'work', '--output-file', 'image.igvm',
-                            '--application', 'custom-app'], out_file=io.StringIO())
-            self.assertEqual(raised.exception.code, 2)
-            build.assert_not_called()
+            with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
+                    Path('image.igvm'), self.measurements)) as build:
+                code = cli.invoke(
+                    ['ace', 'create', '--workspace', 'work', '--output-file', 'image.igvm',
+                     '--application', 'custom-app', '--init-script', 'custom-init'],
+                    out_file=io.StringIO())
+            self.assertEqual(code, 0, str(cli.result.error))
+            self.assertEqual(build.call_args.kwargs['application'], Path('custom-app'))
+            self.assertEqual(build.call_args.kwargs['init_script'], Path('custom-init'))
+
+    def test_application_override_does_not_require_packaged_application(self) -> None:
+        with patch.object(custom, 'DEFAULT_APPLICATION', Path('missing-packaged-app')), \
+                patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
+                    Path('image.igvm'), self.measurements)) as build:
+            custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle',
+                              application='custom-app')
+        self.assertEqual(build.call_args.kwargs['application'], Path('custom-app'))
+        self.assertEqual(build.call_args.kwargs['init_script'],
+                         custom.DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init')
 
     def test_archive_override_is_forwarded_without_requiring_packaged_bundle(self) -> None:
         with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
@@ -570,6 +585,18 @@ class ImageBuilderTest(unittest.TestCase):
                 self.application.write_bytes(data)
                 with self.assertRaisesRegex(builder.IgvmBuildError, message):
                     self.build()
+        self.run.assert_not_called()
+
+    def test_application_override_validation_never_falls_back_to_packaged_app(self) -> None:
+        cmd = SimpleNamespace(cli_ctx=SimpleNamespace(data={'safe_params': []}))
+        self.application.write_bytes(b'not an executable')
+        for application in (self.application, self.root / 'missing-app'):
+            with self.subTest(application=application):
+                with self.assertRaisesRegex(CLIError, 'Unable to create ACE image: validate:'):
+                    custom.create_ace(
+                        cmd, str(self.workspace), str(self.output), dependency_bundle=str(self.bundle),
+                        application=str(application), init_script=str(self.init))
+                self.assertFalse(self.output.exists())
         self.run.assert_not_called()
 
     def test_init_requires_shebang_and_unix_line_endings(self) -> None:

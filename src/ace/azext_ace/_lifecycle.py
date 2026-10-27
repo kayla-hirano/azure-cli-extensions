@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Optional
 
+import grpc
 from knack.log import get_logger
 from knack.util import CLIError
 
@@ -264,13 +265,26 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
             if not (directory / 'rpc.sock').is_socket():
                 raise CLIError('Owned OpenVMM is alive but RPC socket is missing; destruction is unconfirmed.')
             try:
-                with VmClient(directory / 'rpc.sock', time.monotonic() + timeout) as client:
+                deadline = time.monotonic() + timeout
+                with VmClient(directory / 'rpc.sock', deadline) as client:
                     properties = client.call('PropertiesVM')
                     if properties.state != vm.Uninitialized:
                         # TeardownVM releases the guest's resources but does not stop the RPC server.
                         client.call('TeardownVM')
                     # Quit requests OpenVMM process exit, ending the RPC server itself.
-                    client.call('Quit')
+                    try:
+                        client.call('Quit')
+                    except CLIError as error:
+                        cause = error.__cause__
+                        if not isinstance(cause, grpc.RpcError) or cause.code() != grpc.StatusCode.UNAVAILABLE:
+                            raise
+                        # OpenVMM can exit before acknowledging Quit; verify exit without sending signals.
+                        while alive(runtime['openvmm']):
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise
+                            time.sleep(min(0.1, remaining))
+                        logger.debug('OpenVMM exited before acknowledging Quit: %s', error)
             except CLIError as error:
                 # Preserve a retryable failure rather than forcing shutdown after unconfirmed RPC.
                 state['status'] = 'destroy-failed'

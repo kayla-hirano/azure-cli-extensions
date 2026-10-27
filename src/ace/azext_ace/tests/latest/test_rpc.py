@@ -85,6 +85,11 @@ class RpcContractTest(unittest.TestCase):
                 lambda _r, _c: vm.PropertiesVMResponse(state=vm.Running),
                 request_deserializer=vm.PropertiesVMRequest.FromString,
                 response_serializer=vm.PropertiesVMResponse.SerializeToString),
+            'Quit': grpc.unary_unary_rpc_method_handler(
+                lambda _r, context: context.abort(
+                    grpc.StatusCode.UNAVAILABLE, 'Stream removed (Socket closed)'),
+                request_deserializer=Empty.FromString,
+                response_serializer=Empty.SerializeToString),
         }),))
         port = server.add_insecure_port('127.0.0.1:0')
         server.start()
@@ -97,6 +102,10 @@ class RpcContractTest(unittest.TestCase):
                     self.assertEqual(client.call('PropertiesVM').state, vm.Running)
                     with self.assertRaisesRegex(CLIError, 'UNIMPLEMENTED'):
                         client.call('ResumeVM')
+                    with self.assertRaisesRegex(CLIError, 'Quit failed.*UNAVAILABLE') as failure:
+                        client.call('Quit')
+                    self.assertIsInstance(failure.exception.__cause__, grpc.RpcError)
+                    self.assertEqual(failure.exception.__cause__.code(), grpc.StatusCode.UNAVAILABLE)
             self.assertEqual(received[0].log_id, 'demo')
         finally:
             channel.close()
@@ -550,6 +559,92 @@ class LifecycleTest(LinuxFilesystemTest):
                 _lifecycle.destroy('demo')
             stop.assert_not_called()
         self.assertEqual(_instance.read_record(self.directory / 'instance.json')['status'], 'destroy-failed')
+
+    def quit_error(self, status: grpc.StatusCode = grpc.StatusCode.UNAVAILABLE) -> CLIError:
+        class TransportError(grpc.RpcError):
+            def code(self) -> grpc.StatusCode:
+                return status
+
+        error = CLIError('OpenVMM Quit failed ({}): Stream removed (Socket closed)'.format(status.name))
+        error.__cause__ = TransportError()
+        return error
+
+    def test_destroy_quit_disconnect_succeeds_only_after_owned_server_exits(self) -> None:
+        state = self.prepare_destroy()
+        state.update(status='destroy-failed', error='previous failure', cleanup_error='previous cleanup')
+        for checks in ([True, True, False], [True, True, True, False]):
+            with self.subTest(checks=checks):
+                _instance.write_record(self.directory / 'instance.json', state)
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [
+                    vm.PropertiesVMResponse(state=vm.Running), Empty(), self.quit_error(),
+                ]
+                with patch('azext_ace._lifecycle.alive', side_effect=checks), \
+                        patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
+                        patch('azext_ace._lifecycle.time.monotonic', return_value=0), \
+                        patch('azext_ace._lifecycle.time.sleep') as sleep, \
+                        patch('azext_ace._lifecycle._stop_runtime') as stop:
+                    result = _lifecycle.destroy('demo')
+                    self.assertEqual(result['status'], 'destroyed')
+                    self.assertNotIn('error', result)
+                    self.assertNotIn('cleanup_error', result)
+                    self.assertEqual(result, _instance.read_record(self.directory / 'instance.json'))
+                    stop.assert_called_once_with(self.directory, result)
+                    self.assertEqual(sleep.call_count, len(checks) - 3)
+                self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
+                                 ['PropertiesVM', 'TeardownVM', 'Quit'])
+
+    def test_destroy_quit_disconnect_with_live_server_remains_retryable(self) -> None:
+        self.prepare_destroy()
+        self.client.call.side_effect = [
+            vm.PropertiesVMResponse(state=vm.Running), Empty(), self.quit_error(),
+        ]
+        with patch('azext_ace._lifecycle.alive', return_value=True), \
+                patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_ace._lifecycle.time.monotonic', side_effect=[0, 0, 1]), \
+                patch('azext_ace._lifecycle.time.sleep') as sleep, \
+                patch('azext_ace._lifecycle._stop_runtime') as stop:
+            with self.assertRaisesRegex(CLIError, 'retained for retry.*UNAVAILABLE'):
+                _lifecycle.destroy('demo', timeout=1)
+            stop.assert_not_called()
+            sleep.assert_called_once_with(0.1)
+        state = _instance.read_record(self.directory / 'instance.json')
+        self.assertEqual(state['status'], 'destroy-failed')
+        self.assertIn('Stream removed (Socket closed)', state['error'])
+
+    def test_destroy_other_quit_errors_are_not_suppressed(self) -> None:
+        self.prepare_destroy()
+        for error in (self.quit_error(grpc.StatusCode.INTERNAL),
+                      self.quit_error(grpc.StatusCode.DEADLINE_EXCEEDED), CLIError('Quit rejected')):
+            with self.subTest(error=str(error)):
+                self.client.call.side_effect = [
+                    vm.PropertiesVMResponse(state=vm.Uninitialized), error,
+                ]
+                with patch('azext_ace._lifecycle.alive', side_effect=[True, True]) as alive, \
+                        patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
+                        patch('azext_ace._lifecycle._stop_runtime') as stop:
+                    with self.assertRaisesRegex(CLIError, 'retained for retry'):
+                        _lifecycle.destroy('demo')
+                    self.assertEqual(alive.call_count, 2)
+                    stop.assert_not_called()
+                self.assertEqual(_instance.read_record(
+                    self.directory / 'instance.json')['status'], 'destroy-failed')
+
+    def test_destroy_disconnect_before_quit_is_not_suppressed(self) -> None:
+        self.prepare_destroy()
+        for responses in ([self.quit_error()],
+                          [vm.PropertiesVMResponse(state=vm.Running), self.quit_error()]):
+            with self.subTest(failed_call=len(responses)):
+                self.client.call.side_effect = responses
+                with patch('azext_ace._lifecycle.alive', side_effect=[True, True]) as alive, \
+                        patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
+                        patch('azext_ace._lifecycle._stop_runtime') as stop:
+                    with self.assertRaisesRegex(CLIError, 'retained for retry'):
+                        _lifecycle.destroy('demo')
+                    self.assertEqual(alive.call_count, 2)
+                    stop.assert_not_called()
+                self.assertEqual(_instance.read_record(
+                    self.directory / 'instance.json')['status'], 'destroy-failed')
 
     def test_destroy_missing_socket_does_not_claim_success(self):
         """Distinguish an unreachable management endpoint from a stopped owned server."""
