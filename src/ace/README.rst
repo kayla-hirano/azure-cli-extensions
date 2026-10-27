@@ -56,7 +56,6 @@ existing environment; no bootstrap or package installation is needed::
 
     export ACE_VENV="$HOME/.venvs/ace-dev"
     source "$ACE_VENV/activate-ace.sh"
-    export IGVM="$HOME/skr-bvt/skr-bvt.igvm"
 
 Source edits take effect on the next CLI invocation. If dependencies or
 packaging metadata change, stop managed instances before rerunning bootstrap.
@@ -80,56 +79,59 @@ Validate Azure Linux 3.0 and ``/dev/mshv``, install
 Create
 ~~~~~~
 
-Package a precompiled static x86-64 application into an IGVM using an
-existing dependency bundle. Run as your normal user on Linux L1 with GNU
-cpio and gzip installed; root and Azure login are not required. See
-`Prepare dependency bundle and application`_ below for example inputs::
+Build an IGVM using the dependency archive, enclave application, and init
+script packaged with the extension. Run as your normal user on Linux L1
+with GNU cpio and gzip installed::
 
     "$ACE_VENV/bin/az" ace create \
-        --dependency-bundle "$HOME/ace-inputs/dependencies" \
-        --application "$HOME/ace-inputs/enclave_app" \
         --workspace "$HOME/ace-build" \
         --output-file "$HOME/images/enclave.igvm"
 
-By default the packaged init script ``skr-bvt-init`` will be used, but
-``--init-script`` parameter can be used to specify a custom init script.
+The packaged inputs are under ``azext_ace/dependencies/``:
+
+* ``dependencies.tar.gz``: the trusted ``measured-pcie-v1`` bundle containing
+  the kernel, base initrd, SNP boot shim, ``igvmfilegen``, guest manifest,
+  and artifact hashes.
+* ``enclave_app``: the static x86-64 application installed as
+  ``/bin/enclave_app``.
+* ``initramfs/skr-bvt-init``: the default guest startup script, which starts
+  the application on guest vsock port 4050.
+
+Guest debugging is disabled by default, regardless of the bundle's setting.
+``--debug`` enables both SNP guest debugging and diagnostic logs, so use it
+only when a debug-enabled guest is intended. ``--verbose`` changes logging
+only. Neither logging flag retains the workspace by itself.
+
+Optional overrides
+^^^^^^^^^^^^^^^^^^
+
+Use ``--dependency-bundle`` to supply your own trusted tar/tar.gz archive
+or existing bundle directory instead of the packaged archive::
+
+    "$ACE_VENV/bin/az" ace create \
+        --dependency-bundle "$HOME/ace-inputs/dependencies.tar.gz" \
+        --workspace "$HOME/ace-build" \
+        --output-file "$HOME/images/custom-dependencies.igvm"
+
+An archive must contain ``dependency-manifest.v1.json`` and its referenced
+artifacts at the root or inside one top-level directory. Archives are
+extracted into the private workspace. Unsafe paths, links, special files,
+and duplicate files are rejected; artifact hashes are checked before
+executing bundled tools. Inputs are not modified.
+
+Use ``--init-script`` to override guest startup. The supplied script must
+have a shebang and LF line endings and start the application appropriately.
+Launch expects a compatible application response on guest vsock port 4050.
 
 Optional ``--signing-key`` requires OpenSSL and an unencrypted PEM ECDSA
-P-384 key. Signing failure never publishes an unsigned fallback.
+P-384 key. Signing failure never publishes an unsigned fallback. Adding a
+signed SNP ID block does not change the expected launch measurement::
 
-The extension ships direct, unmodified copies of ACC-CVM-Tooling's
-``src/ace/image_builder.py`` as ``azext_ace/_image_builder.py`` and
-``src/ace/initramfs/skr-bvt-init`` as ``azext_ace/initramfs/skr-bvt-init``
-to use as part of the create command.
-
-Prepare dependency bundle and application
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-``--dependency-bundle`` is a trusted ``measured-pcie-v1`` bundle containing
-the L2 kernel, base initrd, SNP boot shim, executable ``igvmfilegen``, guest
-manifest, and artifact hashes. ``--application`` is a static x86-64 ELF
-executable, installed in the guest as ``/bin/enclave_app``.
-
-You can build both on a Linux/WSL machine with an authorized
-ACC-CVM-Tooling checkout, then copy them to L1. See the example below for guidance::
-
-    export TOOLING="$HOME/ACC-CVM-Tooling"
-    export WORK="$HOME/ace-input-build"
-    mkdir -p "$WORK"
-
-    bash "$TOOLING/src/ace/scripts/build-igvm-dependencies.sh" \
-        --workspace "$WORK/dependency-build-1" \
-        --output "$WORK/dependencies"
-
-    rustup target add x86_64-unknown-linux-musl
-    env -u CARGO_TARGET_DIR TARGET=x86_64-unknown-linux-musl \
-        bash "$TOOLING/src/ace/scripts/build-enclave-app.sh"
-    export APP="$TOOLING/src/ace/target/x86_64-unknown-linux-musl/release/enclave_app"
-
-    (cd "$WORK/dependencies" && sha256sum --check SHA256SUMS)
-    test -s "$APP"
-
-Once the two artifacts are created, copy them over to the L1 host for use with the ACE extension.
+    "$ACE_VENV/bin/az" ace create \
+        --workspace "$HOME/ace-build" \
+        --output-file "$HOME/images/signed.igvm" \
+        --signing-key "$HOME/ace-inputs/id-key.pem" \
+        --keep-intermediates
 
 Launch
 ~~~~~~
@@ -202,8 +204,8 @@ changing directories::
 
 ``evidence.report`` is the hex-encoded 1184-byte SNP report. ACE checks the
 report's shape, **not** its signature, measurement, challenge binding, or
-certificate chain. The instance record has ``attestation_verified: false``;
-successful launch is not verified attestation and performs no key release.
+certificate chain. Successful launch is not verified attestation and
+performs no key release.
 
 The same directory retains ``instance.json``, ``openvmm.log``,
 ``supervisor.log``, and ``com1.log`` for diagnosis, including after destroy.
