@@ -6,6 +6,7 @@
 """Coordinate local L1 launch/destroy, RPC calls, guest readiness, and failure recovery."""
 
 import hashlib
+from io import BufferedReader, BufferedRWPair
 import json
 import os
 import secrets
@@ -15,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import BinaryIO, Optional
+from typing import Optional, Union
 
 import grpc
 from knack.log import get_logger
@@ -49,9 +50,9 @@ def _instance_info(directory: Path) -> dict:
     }
 
 
-def read_line(stream: BinaryIO, connection: Optional[socket.socket] = None,
+def read_line(stream: Union[BufferedReader, BufferedRWPair], connection: Optional[socket.socket] = None,
               deadline: Optional[float] = None) -> bytes:
-    """Read one bounded relay line, enforcing a total deadline when a socket is supplied."""
+    """Read a buffered relay line in chunks without consuming bytes from the next line."""
     line = bytearray()
     while len(line) <= MAX_LINE_BYTES:
         if connection is not None and deadline is not None:
@@ -59,11 +60,14 @@ def read_line(stream: BinaryIO, connection: Optional[socket.socket] = None,
             if remaining <= 0:
                 raise CLIError('Guest response timed out.')
             connection.settimeout(min(5, remaining))
-        chunk = stream.read(1)
-        if not chunk:
+        available = stream.peek(1)
+        if not available:
             break
+        newline = available.find(b'\n')
+        size = len(available) if newline < 0 else newline + 1
+        chunk = stream.read(min(size, MAX_LINE_BYTES + 1 - len(line)))
         line.extend(chunk)
-        if chunk == b'\n':
+        if chunk.endswith(b'\n'):
             break
     if not line:
         # The relay can close before the guest listener is ready; let the readiness loop retry.
@@ -85,14 +89,16 @@ def probe_guest(directory: Path, deadline: float) -> None:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(min(5, max(0.01, deadline - time.monotonic())))
                 connection.connect(str(directory / 'vsock.sock'))
-                with connection.makefile('rwb', buffering=0) as stream:
+                with connection.makefile('rwb') as stream:
                     # Same CONNECT handshake and JSON request as skr-bvt-client.py.
                     stream.write('CONNECT {}\n'.format(GUEST_VSOCK_PORT).encode('ascii'))
+                    stream.flush()
                     if not read_line(stream, connection, deadline).startswith(b'OK '):
                         raise CLIError('OpenVMM rejected the guest relay connection.')
                     stream.write(json.dumps({
                         'challenge': challenge, 'payload': 'hello world',
                     }).encode('utf-8') + b'\n')
+                    stream.flush()
                     response = read_line(stream, connection, deadline)
             value = json.loads(response)
             evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
@@ -240,6 +246,28 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
             raise CLIError('Launch failed: {}. Evidence retained in {}'.format(error, directory)) from error
 
 
+def _shutdown_runtime(directory: Path, process: dict, deadline: float) -> None:
+    """Tear down the guest and quit its owned server, accepting a lost reply only after exit."""
+    with VmClient(directory / 'rpc.sock', deadline) as client:
+        properties = client.call('PropertiesVM')
+        if properties.state != vm.Uninitialized:
+            # TeardownVM releases the guest's resources but does not stop the RPC server.
+            client.call('TeardownVM')
+        try:
+            client.call('Quit')
+        except CLIError as error:
+            cause = error.__cause__
+            if not isinstance(cause, grpc.RpcError) or cause.code() != grpc.StatusCode.UNAVAILABLE:
+                raise
+            # OpenVMM can exit before acknowledging Quit; verify exit without sending signals.
+            while alive(process):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(0.1, remaining))
+            logger.debug('OpenVMM exited before acknowledging Quit: %s', error)
+
+
 def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) -> dict:
     """Reconcile an instance, tear down its VM through RPC, and preserve logs and image files."""
     require_host(timeout)
@@ -265,26 +293,7 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
             if not (directory / 'rpc.sock').is_socket():
                 raise CLIError('Owned OpenVMM is alive but RPC socket is missing; destruction is unconfirmed.')
             try:
-                deadline = time.monotonic() + timeout
-                with VmClient(directory / 'rpc.sock', deadline) as client:
-                    properties = client.call('PropertiesVM')
-                    if properties.state != vm.Uninitialized:
-                        # TeardownVM releases the guest's resources but does not stop the RPC server.
-                        client.call('TeardownVM')
-                    # Quit requests OpenVMM process exit, ending the RPC server itself.
-                    try:
-                        client.call('Quit')
-                    except CLIError as error:
-                        cause = error.__cause__
-                        if not isinstance(cause, grpc.RpcError) or cause.code() != grpc.StatusCode.UNAVAILABLE:
-                            raise
-                        # OpenVMM can exit before acknowledging Quit; verify exit without sending signals.
-                        while alive(runtime['openvmm']):
-                            remaining = deadline - time.monotonic()
-                            if remaining <= 0:
-                                raise
-                            time.sleep(min(0.1, remaining))
-                        logger.debug('OpenVMM exited before acknowledging Quit: %s', error)
+                _shutdown_runtime(directory, runtime['openvmm'], time.monotonic() + timeout)
             except CLIError as error:
                 # Preserve a retryable failure rather than forcing shutdown after unconfirmed RPC.
                 state['status'] = 'destroy-failed'
