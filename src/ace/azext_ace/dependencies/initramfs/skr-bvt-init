@@ -1,0 +1,17 @@
+#!/bin/sh
+
+set -e
+
+export PATH="/bin:/sbin:/usr/bin:/usr/sbin"
+
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+echo "Starting SKR BVT enclave app"
+echo "Kernel: $(uname -r)"
+ls -l /dev/sev-guest 2>/dev/null || true
+
+exec /bin/enclave_app serve-vsock 4050
