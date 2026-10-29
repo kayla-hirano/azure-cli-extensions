@@ -1,53 +1,237 @@
-# ACE: Design for broader customer testing
+# ACE extension improvements
 
-**Status:** Design draft. The current design describes implemented behavior.
-The proposed abstracted design and required changes are recommendations for
-review, not implemented capabilities or a finalized CLI contract.
+**Naming direction:** All references to ACE (Azure Confidential Enclaves) will
+eventually be replaced with a new name. Use CE (Confidential Enclaves) as the
+provisional name. Existing ACE command, package, and path names in this document
+describe the current implementation; the rename is not yet implemented.
 
-## Goal and scope
+## 1. Objective and scope
 
-Evolve ACE from a demo-oriented extension into a tool that customers can use
-to test and customize their enclave workloads. Preserve the existing command
-baseline, then describe how image creation could accept individual dependency
-artifacts without requiring customers to construct a complete dependency bundle.
+Make ACE a reusable enclave image-composition tool: accept externally built
+dependency bundles and applications, compose reproducible images, optionally sign
+them, and preserve the existing launch/destroy interface.
 
-This draft focuses on dependency selection, image composition, and the changes
-needed to support that abstraction. It does not propose compiling dependencies
-on every create invocation, arbitrary workload-format support, or new
-attestation guarantees.
+Create will **not** compile dependencies or applications. This increment does
+not add arbitrary workload formats, new attestation guarantees, or a generic
+application-readiness protocol. Supported launch resources/devices will instead
+be derived from the image configuration through an image-bound launch profile.
 
-## Current design
+## 2. Current design
 
-`az ace` builds SNP enclave images and manages local enclave VMs using OpenVMM.
-It operates on local files and host processes; no Azure login is required.
-It does not provision an Azure VM or manage Azure resources.
+```text
+Packaged defaults or explicit local bundle + application + init script
+    -> az ace create -> composed initrd -> IGVM + expected measurements
+    -> az ace launch -> guest readiness exchange -> az ace destroy
+```
 
-The typical workflow is:
+| Command | Current responsibility |
+| --- | --- |
+| `setup` | Validate Azure Linux 3.0/MSHV prerequisites and install or verify the pinned OpenVMM package. |
+| `create` | Validate prebuilt inputs, compose the initrd, generate the IGVM, and optionally sign its SNP ID block. |
+| `launch` | Start supervised OpenVMM, create/resume the VM, and wait for the sample guest response. |
+| `destroy` | Stop owned processes, remove owned sockets, and retain logs/evidence. |
 
-1. Install the extension and its Python dependencies.
-2. Run `az ace setup` as root on the target L1 host.
-3. Run `az ace create` as a normal user to build an IGVM, or supply an existing
-   compatible IGVM and skip this step.
-4. Run `az ace launch` as root to start the enclave and wait for the expected
-   guest response.
-5. Run `az ace destroy` as root on the same host when testing is complete.
+Most image composition already lives in the CLI rather than external scripts.
+Remaining demo coupling is concentrated in:
 
-The [README](README.rst) describes both editable developer installation and
-wheel-based testing. With wheel installations, the extension is installed
-separately for the normal user and root. With the developer environment, both
-use the same extension installation but separate Azure CLI configuration
-directories. The examples below assume the intended CLI and extension
-installation are already selected; see the README for the required `sudo`
-environment when using the developer setup.
+- **Artifact delivery:** The wheel packages a dependency archive, `enclave_app`,
+  and `enclave-init`; release retrieval is not implemented.
+- **Input compatibility:** The bundle requires a specific manifest/profile and
+  compatible image-generation tooling. The application is a static x86-64 ELF.
+- **Startup and readiness:** The default `/init` runs
+  `/bin/enclave_app serve-vsock 4050`. Launch requires the sample JSON exchange
+  and an SNP-shaped response on that port.
+- **Runtime configuration:** Launch uses one CPU, 160 MiB, a fixed PCIe/vsock
+  layout, and one active managed runtime per host.
 
-### Command summary
+The initial abstraction removes dependency delivery/build coupling, not every
+sample protocol constraint. Customers can already override the application and
+init script, but those inputs must remain compatible with launch.
 
-| Command | Purpose | Execution context |
+## 3. Target design and agreed decisions
+
+The **dependency triple** is the **L2 kernel, base initrd, and SNP boot shim**.
+It is a subset of the **dependency bundle**, which also carries `igvmfilegen`,
+IGVM configuration, and provenance records. The bundle remains the pipeline
+output and create input; the triple is not a new input format.
+
+| Boundary | Agreed design |
+| --- | --- |
+| Dependency builds | Run the existing `build-igvm-dependencies.sh` script in a separate pipeline and publish its dependency bundle output. The script owns source/toolchain pinning and reproducibility of the triple; create does not rebuild or assemble that bundle. |
+| Application builds | Customers or the samples repository build the executable. Application reproducibility scripts stay in that repository. The default `enclave_app` will live in the same public dependency/sample repository. |
+| Default resources | Add a retrieval stub/placeholder in `setup.py`, then retrieve external release resources during extension wheel construction and package them in the wheel as the no-override defaults. Keep existing defaults until this works. The external repository/pipeline owns dependency versions; the extension does not maintain independent component pins. Repository, release assets, and compatibility versions remain TBD. This is separate from `az ace setup`. |
+| Customer overrides | Retain `--dependency-bundle`, `--application`, and `--init-script`. Explicit parameters override the corresponding defaults; customers provide and are responsible for compatible custom resources. Other inputs retain their defaults. Individual artifact options are not required. |
+| Create | Consume the dependency bundle and prebuilt application; unpack the bundle's base initrd; install the application and base init script; repack; generate the IGVM and expected measurements; optionally sign its SNP ID block; export a launch-profile sidecar. |
+| Startup | The external repository will contain all default resources before the extension release, including the dependency bundle, sample application, and default init script. Keep the existing `--init-script` replacement option; application selection remains independent of dependency selection. |
+| Lifecycle | Preserve lifecycle ownership and teardown behavior. Extend launch configuration to consume the image-bound profile instead of hard-coded resources/devices; define profile selection without redesigning destroy. Verify cleanup and fix gaps as part of implementation. |
+
+```text
+Existing dependency build script -> pipeline output: dependency bundle
+    (triple + compatible tooling/profile + metadata)
+Samples/customer build -> prebuilt application
+    -> wheel build: retrieve external resources -> package defaults in extension
+       (customer-provided parameter overrides take precedence)
+    -> create: unpack -> install app and /init -> repack -> generate -> optional sign
+       -> final IGVM + launch profile
+    -> launch: validate profile/image -> configure OpenVMM -> existing lifecycle
+    -> destroy using the existing lifecycle contract
+```
+
+### Image-bound launch configuration
+
+**Proposed, not implemented:** Create exports a versioned launch-profile sidecar
+alongside the IGVM, derived from the exact effective IGVM JSON used to build it,
+not a later copy of the bundle configuration. Launch validates the profile and
+its image hash before constructing the OpenVMM request through shared mapping
+logic. This extends the earlier largely-unchanged launch scope only for
+configuration; readiness and process-management responsibilities remain intact.
+
+**Selection rules:** Create writes `<image-filename>.launch.json` adjacent to
+the final image (for example, `custom.igvm.launch.json`). Launch uses an explicit
+profile path when supplied, otherwise discovers that adjacent file. The exact
+option name is not finalized. A present profile must pass schema, settings,
+and image-hash validation; an explicitly supplied missing/unreadable path is
+an input error, not permission to ignore the requested profile.
+
+If no explicit profile is requested and no adjacent sidecar exists, launch
+continues with today's hard-coded resource/device settings and logs a visible
+warning identifying that fallback, including one CPU and 160 MiB of memory.
+No opt-in compatibility flag is required. This preserves existing image usage
+but does not prove that the image is compatible with those settings.
+
+| Profile setting | Source and purpose |
+| --- | --- |
+| Schema version | Identifies the profile contract so launch can reject unsupported formats rather than guess field meanings. |
+| Final IGVM SHA-256 | Binds the profile to the published image, including optional ID-block signing, to detect accidental mismatches. This is not publisher authentication or attestation verification. |
+| Virtual CPU count | Derived from `processor_count`; tells OpenVMM how many processors to provide, matching image expectations. |
+| Memory size | Derived from `memory_page_count` using the supported profile's 4-KiB pages, converted to OpenVMM units with exactness/range checks; supplies the guest's required memory. |
+| PCIe segment and bus range | Derived from `pcie_host_bridge`; identifies the PCIe address space in which the guest expects devices. |
+| Low/high MMIO bases and sizes | Derived from `pcie_host_bridge`; reserves the device memory windows described by the measured image configuration. |
+| ECAM base / supported layout | Records where the guest expects PCIe configuration space. Map it only if the runtime exposes that setting; otherwise validate the layout against the pinned runtime and reject unsupported values. Do not silently drop it. |
+
+The JSON is not a complete OpenVMM configuration. Host socket paths, serial
+connections, process ownership, and vsock device attachment remain generated by
+launch; the profile must not accept arbitrary executable paths or process
+arguments. Image-only settings such as kernel command line and SNP image policy
+remain in the image-generation configuration, not blindly copied into RPC fields.
+
+Validate CPU/memory limits, unit conversions, bus ranges, MMIO alignment/overlap,
+and generator/runtime support. Publish the IGVM and profile consistently, and
+reject malformed, mismatched, or unsupported profiles with actionable errors;
+do not fall back when a present profile is invalid. The missing-sidecar path
+uses the original configuration with a warning, not inferred image settings.
+
+### Customer customization and build workflow
+
+The following describes **existing overrides**, not proposed individual-artifact
+flags. Defaults are currently packaged; the target design changes their source
+to repository releases, not the customer's responsibility for custom inputs.
+
+| Component | What the customer can change | How to build and supply it |
 | --- | --- | --- |
-| `az ace setup` | Validate host prerequisites and install or verify the supported OpenVMM package. | Root on Azure Linux 3.0 L1 with a compatible kernel exposing `/dev/mshv`. |
-| `az ace create` | Package an application and guest startup script into an SNP IGVM using a trusted dependency bundle. | Normal user on Linux or WSL with GNU cpio and gzip. No L1 runtime is needed to build an image. |
-| `az ace launch` | Start OpenVMM, create and resume a VM from an IGVM, and wait for a compatible guest response. | Root on the Linux L1 host with `/dev/mshv` and a compatible OpenVMM runtime. |
-| `az ace destroy` | Stop the VM and runtime and remove owned sockets while retaining diagnostic artifacts. | Root on the same L1 host, using the instance's original state directory. |
+| L2 kernel | Kernel image and enabled guest features/drivers; not the L1 host kernel. | Build a compatible x86-64 kernel externally, replace the bundle's kernel artifact, and supply the complete bundle through `--dependency-bundle`. |
+| Base initrd | Guest filesystem, libraries, utilities, and supporting files. | Build a gzip-compressed cpio initrd externally and replace its bundle artifact. Create subsequently overwrites `/bin/enclave_app` and `/init` with the separately selected inputs. |
+| SNP boot shim | Compatible early-boot implementation/version. | Build externally using the supported OpenVMM toolchain and replace its bundle artifact. Kernel/shim/profile compatibility remains the customer's responsibility. |
+| IGVM configuration | Kernel command line and compatible image/SNP settings. | Edit the bundle's IGVM JSON and update its manifest hash. Today resource/device changes must match hard-coded launch settings; the proposed sidecar will carry supported settings into launch. Create overrides the JSON's guest-debug setting. |
+| `igvmfilegen` | Compatible image-generation tool/version. | Build externally and replace the executable bundle artifact. It must support the CLI's generator commands and measurement/signing outputs; it is not the host OpenVMM runtime. |
+| Application | Customer workload logic in one static x86-64 ELF executable. | Build using the customer's toolchain or sample recipe; supply its binary with `--application`. Source directories and container images are not accepted. |
+| Init script | Guest initialization, application arguments, and environment. | Supply a shebang script with LF line endings through `--init-script`. This replaces all of guest `/init`, including mounts/initialization, rather than adding a post-start hook. |
+
+**Building a custom bundle:** Start from the existing dependency-build script
+linked in the references. It builds pinned sources with Rust/Cargo and Docker
+and emits the complete bundle; it does not accept arbitrary prebuilt artifact
+paths. Its local-source options require clean checkouts at the pinned revisions.
+For customized components, maintain an explicit derivative build recipe or
+replace artifacts in a private copy of a compatible bundle after building them
+externally. Do not expect create to perform those builds.
+
+Keep `dependency-manifest.v1.json` paths and SHA-256 hashes consistent with every
+replaced artifact, and update accompanying build/provenance records and
+`SHA256SUMS` when present. Do not retain default-build provenance for custom
+outputs. The reader validates all manifest-listed artifacts; regenerating hashes
+does not prove authenticity or boot compatibility.
+
+**Building a custom application:** The sample `build-enclave-app.sh` builds the
+Rust `enclave_app` package with `--release --locked`, defaulting to
+`x86_64-unknown-linux-musl`. The script requires the sample workspace and build
+dependencies, not just the script file. Customers can adapt that source/build
+recipe or use another language/toolchain that produces the accepted static ELF.
+Application reproducibility remains in the sample/customer build workflow.
+
+For example, after building compatible inputs on Linux:
+
+```bash
+az ace create \
+    --dependency-bundle "$HOME/custom-dependencies" \
+    --application "$HOME/build/my-app" \
+    --init-script "$HOME/my-init" \
+    --workspace "$HOME/ace-build" \
+    --output-file "$HOME/images/custom.igvm"
+```
+
+Omit a resource option to retain that resource's default. A custom bundle does
+not select an application or init script implicitly. Use returned measurements
+for the rebuilt image, then launch it using the existing command.
+
+### Defaults and compatibility constraints
+
+Values below are from the currently packaged bundle and CLI, not promised values
+for every future dependency release.
+
+| Source | Current values | Effect on customization |
+| --- | --- | --- |
+| Bundle IGVM profile | `guest_arch: x64`, `guest_svn: 1`, `max_vtl: 0`; SNP Linux-direct boot with `use_initrd: true`. | Custom images must remain within the supported x86-64 SNP profile and generator contract. |
+| Bundle image resources | `processor_count: 1`, `memory_page_count: 40960` (160 MiB), `c_bit_position: 51`. | Changing image settings does not change launch's one-CPU/160-MiB runtime configuration. |
+| Bundle kernel command line | `console=ttyS0 earlyprintk=serial earlycon panic=-1`. | Change through the bundle profile; preserve console/boot behavior needed for diagnosis. |
+| Bundle SNP settings | `policy: 196608` (`0x30000`), `injection_type: normal`, `secure_avic: disabled`, `shared_gpa_boundary_bits: null`. | Advanced policy changes require compatibility validation. The bundle records `enable_debug: true`, but create forces it off unless CLI `--debug` is supplied. |
+| Bundle measured PCIe layout | Segment 0, buses 0-1; ECAM base `0xf6e00000`; low MMIO base `0xf7000000`, size 16 MiB; high MMIO base `0x100000000`, size 1 MiB. | Keep the measured layout compatible with launch; editing the bundle does not reconfigure the runtime devices. |
+| Default init/application startup | Application installed as `/bin/enclave_app`; script executes `serve-vsock 4050`. | A replacement executable must accept those arguments or use a matching custom init script. |
+| CLI readiness | Port 4050; newline-delimited challenge/payload JSON with payload `hello world`; requires an SNP-shaped report. | This is enforced by launch, not merely an application default. Different protocols/ports require future readiness work. No attestation verification or key release is performed by launch. |
+| CLI composition | `SOURCE_DATE_EPOCH` defaults to 0; normalized cpio metadata and timestamp-free gzip; unsigned unless `--signing-key` is supplied. | Control inputs/tool versions for reproducibility. Changes to image contents/configuration can change expected measurements. |
+
+## 4. Required changes
+
+| Area | Remaining work |
+| --- | --- |
+| Naming | Replace ACE terminology and identifiers with the eventual name; use CE provisionally. Coordinate command, package, path, help, documentation, and test changes, and define compatibility for existing users. |
+| Resource retrieval | Add the `setup.py` placeholder first, then connect it to external releases during wheel construction, with integrity checks, recorded release identity, and explicit errors. The external release owns component versions; release/compatibility selection remains TBD. Verify retrieval in the wheel-build workflow, not during customer installation. |
+| Default migration and overrides | Keep current defaults until retrieval works; replace locally maintained resource payloads with build-fetched resources while retaining their inclusion in the wheel. Package all required defaults published before extension release. Preserve per-resource parameter precedence and customer compatibility responsibilities. The stub must not pretend retrieval succeeded. |
+| Pipeline and create contract | Run the existing dependency-build script in the pipeline and publish its bundle, including the triple, tooling/profile, and metadata. Reuse existing validation, composition, and optional signing; do not compile dependencies or applications in create. |
+| Image-bound launch profile | Define the schema and shared mapping; export the adjacent sidecar bound to the final IGVM. Support explicit profile selection, automatic discovery, and the original hard-coded settings with a visible warning when no sidecar is found. Reject invalid profiles rather than falling back. Test both paths, conversions, unsupported layouts, mismatches, and guest boot. |
+| Reproducibility and validation | Verify repository defaults and custom overrides, retrieval failures, output safety, retention, and signing. Compare controlled repeated initrd/IGVM builds and measurements; characterize signed outputs separately. Update help and run Linux image-build/guest tests. |
+| Launch/destroy cleanup | Verify existing cleanup for success, failure/timeout, child exits, interrupted teardown, and repeated destroy; fix uncovered gaps. Confirm owned processes are reaped, sockets removed, guards released only after process exit, and logs/evidence retained. |
+
+These are planned changes and validation criteria, not completed implementation
+or findings that lifecycle bugs necessarily exist.
+
+## 5. Deferred improvements and open questions
+
+**Deferred:** Individual kernel/initrd/boot-shim overrides; resolved-input
+provenance export; modular sample workload/transport/attestation libraries;
+generic readiness; independent guest-debug/logging controls; and richer
+multi-file or multi-process workloads. These are not prerequisites for the
+agreed initial scope.
+
+**Target host follow-up:** Validate the planned commercially available Azure
+Linux 4/MSHV image when details arrive in November 2026. Current setup remains
+Azure Linux 3.0-specific.
+
+**Open implementation questions:**
+
+- Which public repository/release assets and compatibility versions will be used?
+
+## Appendix: Current command reference
+
+These options describe today's CLI, not the target release-provider behavior.
+No Azure login is required for local ACE operations. Customers install Azure
+CLI and ACE before setup. Use the
+[customer-testing fork](https://github.com/kayla-hirano/azure-cli-extensions)
+initially; the intended source after merge is
+[upstream](https://github.com/Azure/azure-cli-extensions).
+With wheel installation, install the extension separately for the normal user
+and root. Developer installations share the environment but use separate CLI
+configuration directories. Follow the [README](README.rst) for exact installation
+and privileged invocation instructions.
 
 ### `az ace setup`
 
@@ -55,110 +239,97 @@ environment when using the developer setup.
 sudo az ace setup [--yes]
 ```
 
-Setup validates Azure Linux 3.0 and the `/dev/mshv` character device. If
-OpenVMM is absent, it prompts before installing `openvmm-0.2.0-2.azl3` using
-`tdnf` and the host's configured repositories. It verifies the supported
-runtime's RPM version and integrity, including for existing installations.
-An incompatible or modified installation fails verification and requires
-manual repair.
+Run as root on Azure Linux 3.0 L1 with a compatible kernel exposing `/dev/mshv`.
+Setup installs `openvmm-0.2.0-2.azl3` through configured `tdnf` repositories if
+absent, with confirmation, and verifies RPM version/integrity. Incompatible
+installations require manual repair.
 
-| Parameter | Required | Default | Current behavior |
+| Parameter | Required | Default | Behavior |
 | --- | --- | --- | --- |
-| `--yes`, `-y` | No | `false` | Approve OpenVMM package installation without an interactive prompt. Host and runtime validation still apply. |
+| `--yes`, `-y` | No | `false` | Approve package installation without prompting; validation remains required. |
 
-The result includes readiness status, OS, kernel version, and OpenVMM path.
-Readiness here means host prerequisites passed, not that an enclave boot or
-attestation was verified. Setup does not install the extension or its Python
-dependencies, install developer tools, change the kernel, add repositories,
-reboot, or start OpenVMM.
+Returns status, OS, kernel, and runtime path. It does not provision the host,
+install a kernel, add repositories, reboot, install developer tools, or start
+OpenVMM. Host readiness does not establish guest boot or attestation.
 
 ### `az ace create`
 
 ```bash
-az ace create \
-    --workspace "$HOME/ace-build" \
+az ace create --workspace "$HOME/ace-build" \
     --output-file "$HOME/images/enclave.igvm"
 ```
 
-Create composes an image from prebuilt inputs; it does not compile an
-application or dependencies, install build tools, or launch a VM.
+Run as a normal user on Linux or WSL with GNU cpio and gzip. No L1 runtime is
+needed for image creation. Create does not compile inputs or install build tools.
 
-| Parameter | Required | Default | Current behavior |
+| Parameter | Required | Default | Behavior |
 | --- | --- | --- | --- |
-| `--workspace` | Yes | None | Parent directory for a private build workspace. The parent may already exist. |
-| `--output-file` | Yes | None | Destination IGVM filename. Existing output files are never overwritten. |
-| `--dependency-bundle` | No | Packaged `dependencies/dependencies.tar.gz` | Select a trusted `measured-pcie-v1` tar/tar.gz archive or existing bundle directory. Archives must contain `dependency-manifest.v1.json` and referenced artifacts at the root or within one top-level directory. |
-| `--application` | No | Packaged `dependencies/enclave_app` | Supply a static x86-64 ELF binary. It is installed in the guest as `/bin/enclave_app`. |
-| `--init-script` | No | Packaged `dependencies/initramfs/enclave-init` | Override the guest `/init` script. The script must have a shebang and LF line endings and start the application appropriately. |
-| `--signing-key` | No | No signing key | Sign the SNP ID block using an unencrypted PEM ECDSA P-384 private key. Requires OpenSSL. Signing failure does not publish an unsigned fallback. |
-| `--keep-intermediates` | No | `false` | Retain the private build workspace and stage logs on success or failure. |
+| `--workspace` | Yes | None | Parent for a private workspace; the parent may already exist. |
+| `--output-file` | Yes | None | IGVM destination; existing files are never overwritten. |
+| `--dependency-bundle` | No | Packaged `dependencies/dependencies.tar.gz` | Trusted `measured-pcie-v1` bundle directory or tar/tar.gz archive. |
+| `--application` | No | Packaged `dependencies/enclave_app` | One prebuilt static x86-64 ELF, installed as `/bin/enclave_app`. |
+| `--init-script` | No | Packaged `dependencies/initramfs/enclave-init` | Full guest `/init` replacement; must have a shebang and LF line endings. |
+| `--signing-key` | No | No signing | Unencrypted PEM ECDSA P-384 key for SNP ID-block signing; requires OpenSSL. Failure never publishes an unsigned fallback. |
+| `--keep-intermediates` | No | `false` | Retain private workspace and stage logs on success or failure. |
+| Global `--debug` | No | Disabled | Enables SNP guest debugging **and** diagnostic logging, regardless of the bundle's debug setting. |
+| Global `--verbose` | No | Disabled | Logging only; does not enable guest debugging. |
 
-Two Azure CLI global logging flags are particularly important for this command:
+Logging flags do not retain intermediates. Returns `igvm` and expected SNP
+`measurements`; signing the ID block does not change the expected measurement.
 
-| Global flag | Current effect on create |
+#### Input contents and customization
+
+| Input | Contents and limits |
 | --- | --- |
-| `--debug` | Enables both SNP guest debugging in the generated image and diagnostic CLI logs. Guest debugging is otherwise disabled, regardless of the bundle setting. |
-| `--verbose` | Changes logging only; it does not enable guest debugging. |
+| Dependency triple within the bundle | `kernel/bzImage`, `initrd/base-initrd.cpio.gz`, and `openvmm/snp_bootshim`. The kernel is the L2 guest kernel, not the host kernel. Customers can replace these through a complete compatible bundle today. |
+| Tooling/profile within the bundle | `openvmm/igvmfilegen` and `manifests/snp-linux-direct.json`. The tool executes on the build host; it is not OpenVMM. Profile changes must remain compatible with launch's fixed resources/devices and generator interface. |
+| Bundle metadata | Required `dependency-manifest.v1.json` maps artifact names to paths/hashes. Schema 1, `measured-pcie-v1`, x86-64, and an x64 measured-PCIe configuration are required. Archives place this at the root or inside one top-level directory. |
+| Supplementary bundle records | Default bundle includes `kernel/config`, `kernel/manifest.txt`, the measured-PCIe patch, and `SHA256SUMS`. The CLI checks manifest artifact hashes, not `SHA256SUMS`, and does not apply the patch. |
+| Application | One static little-endian x86-64 ELF executable without `PT_INTERP`; not source, a container, or a dependency archive. No compilation, library installation, or arguments are provided by this option. |
+| Init script | Owns guest mounts, environment, arguments, and startup. Default mounts guest filesystems and executes `/bin/enclave_app serve-vsock 4050`. An override replaces all of `/init`, not an extra hook. |
 
-Neither logging flag retains the build workspace by itself; use
-`--keep-intermediates` for retention.
+Required artifact names are `kernel`, `base_initrd`, `snp_bootshim`,
+`igvmfilegen`, and `igvm_manifest`. All manifest-listed artifacts, including
+optional records, must exist and match their hashes. Hashes do not authenticate
+the publisher or prove boot compatibility; bundled tools must be trusted.
 
-The dependency bundle supplies the kernel, base initrd, SNP boot shim,
-`igvmfilegen`, guest manifest, and artifact hashes. The default init script
-mounts guest filesystems and starts `/bin/enclave_app serve-vsock 4050`.
-A custom application may require a matching `--init-script`; replacing the
-binary alone does not make an arbitrary workload compatible with launch.
-
-The command returns the final IGVM path in `igvm` and expected SNP launch
-measurements in `measurements`. Adding a signed SNP ID block does not change
-the expected launch measurement.
+Application, init script, and bundle are independent selections. A custom
+bundle does not automatically supply the selected application/script. Extra
+guest files currently belong in a custom base initrd; composition overwrites
+`/bin/enclave_app` and `/init`. Changed contents can change measurements.
 
 ### `az ace launch`
 
 ```bash
-sudo az ace launch \
-    --name demo-1 \
-    --igvm "$HOME/images/enclave.igvm"
+sudo az ace launch --name demo-1 --igvm "$HOME/images/enclave.igvm"
 ```
 
-Launch accepts an image produced by create or another compatible IGVM. It
-starts a detached Python supervisor, which starts OpenVMM as its child.
-The CLI creates and resumes the VM through local gRPC, then probes the guest
-application through OpenVMM's vsock relay. The supervisor and OpenVMM
-continue running after the CLI exits.
+Run as root on Linux L1 with `/dev/mshv` and a compatible runtime. Launch starts
+a detached supervisor and OpenVMM child, creates/resumes the VM through local
+gRPC, and probes the guest through the vsock relay. Both processes outlive the CLI.
 
-| Parameter | Required | Default | Current behavior |
+| Parameter | Required | Default | Behavior |
 | --- | --- | --- | --- |
-| `--name`, `-n` | Yes | None | Local instance name, 1-32 characters. Must start with a letter or digit; remaining characters may also include underscores or hyphens. An existing instance directory cannot be reused, even after destroy. |
-| `--igvm` | Yes | None | Path to an existing compatible IGVM on the L1 host. |
-| `--openvmm` | No | `openvmm` | OpenVMM executable path or command name. The default resolves through the executable search path. |
-| `--state-dir` | No | `/var/lib/ace/instances` | Root directory for per-instance state. ACE requires private, root-owned directories with mode `0700`, rejects symlinked state paths, and limits path length to fit Unix socket paths. |
-| `--timeout` | No | `120` seconds | Launch operation timeout. Must be a finite positive number; fractional seconds are accepted. |
-| `--allow-untested-runtime` | No | `false` | Opt out of requiring the expected Azure Linux `0.2.0-2.azl3` runtime package. An alternative runtime must still provide equivalent SNP IGVM RPC and low-ECAM support. This is not a general compatibility guarantee. |
+| `--name`, `-n` | Yes | None | 1-32 characters; starts with a letter/digit, then letters/digits/underscores/hyphens. Existing instance directories cannot be reused, even after destroy. |
+| `--igvm` | Yes | None | Existing compatible IGVM on L1; create output or a customer-provided image. |
+| `--openvmm` | No | `openvmm` | Executable path or name resolved through the executable search path. |
+| `--state-dir` | No | `/var/lib/ace/instances` | Private root-owned state root with mode `0700`. Symlinked paths are rejected; length must fit Unix socket limits. |
+| `--timeout` | No | `120` seconds | Finite positive operation timeout; fractional seconds accepted. |
+| `--allow-untested-runtime` | No | `false` | Permit a runtime outside the expected Azure Linux `0.2.0-2.azl3` package; equivalent SNP IGVM RPC and low-ECAM support are still required. |
 
-Launch uses a fixed CPU, memory, PCIe, and vsock configuration;
-these are not exposed as workload configuration parameters.
-Only one ACE-managed enclave may be active per L1 host, regardless of instance
-name or state directory. The host-wide guard remains held while either
-OpenVMM or its supervisor survives.
+Only one managed runtime is allowed per L1, regardless of name/state root.
+The guard remains held while either runtime process survives. VM resources are
+fixed at one CPU and 160 MiB with the supported PCIe/vsock layout.
 
-Guest readiness is tied to the demo application protocol:
+Readiness connects using `CONNECT 4050`, expects `OK`, and sends newline-delimited
+JSON with a generated challenge and `hello world` payload. The response must
+contain `evidence.tee: snp` and a hex-encoded 1184-byte `evidence.report`.
+**This is shape checking, not signature, measurement, challenge-binding, or
+certificate-chain verification. Launch performs no key release.**
 
-1. Connect to the guest relay and request `CONNECT 4050`.
-2. After an `OK` response, send newline-delimited JSON containing a generated
-   challenge and the fixed payload `hello world`.
-3. Expect a JSON response with `evidence.tee` equal to `snp` and
-   `evidence.report` containing a hex-encoded 1184-byte report.
-
-**Successful launch is not verified attestation.** ACE checks the report's
-shape, not its signature, launch measurement, challenge binding, or certificate
-chain. It performs no key release.
-
-The returned instance details include name, status, IGVM information, vsock
-port and relay socket, RPC socket, supervisor PID, and log/evidence paths.
-After successful readiness, the guest response is saved as `response.json`
-under `<state-dir>/<name>`. The instance directory also contains
-`instance.json`, `openvmm.log`, `supervisor.log`, and `com1.log`.
+Returns instance/status/IGVM details, supervisor PID, sockets, and log/evidence
+paths. State under `<state-dir>/<name>` retains `instance.json`, `response.json`
+after successful readiness, `openvmm.log`, `supervisor.log`, and `com1.log`.
 
 ### `az ace destroy`
 
@@ -166,266 +337,26 @@ under `<state-dir>/<name>`. The instance directory also contains
 sudo az ace destroy --name demo-1
 ```
 
-Destroy tears down the VM through RPC, quits OpenVMM, finishes owned-process
-cleanup, and removes owned sockets. It retains the input IGVM, instance
-record, logs, and any saved guest response.
+Run as root on the same L1 with the original state root. Destroy tears down the
+VM through RPC, quits OpenVMM, finishes owned-process cleanup, and removes owned
+sockets. Input IGVM, instance record, logs, and saved evidence remain.
 
-| Parameter | Required | Default | Current behavior |
+| Parameter | Required | Default | Behavior |
 | --- | --- | --- | --- |
-| `--name`, `-n` | Yes | None | Name of the existing local instance, with the same naming rules as launch. |
-| `--state-dir` | No | `/var/lib/ace/instances` | State root used at launch. A custom root must be supplied again; the same privacy and path constraints apply. |
-| `--timeout` | No | `30` seconds | Teardown operation timeout. Must be a finite positive number; cleanup has additional bounded grace periods. |
+| `--name`, `-n` | Yes | None | Existing instance name, using launch's naming rules. |
+| `--state-dir` | No | `/var/lib/ace/instances` | Must match launch; same privacy/path constraints. |
+| `--timeout` | No | `30` seconds | Finite positive timeout; fractional seconds accepted. Cleanup has additional bounded grace periods. |
 
-Repeated destruction of a confirmed destroyed instance is supported.
-A failed destroy is not proof that the VM stopped; inspect retained logs
-and retry. A subsequent launch requires a new instance name.
-Returned socket paths are informational after successful destruction because
-the sockets have been removed.
+Repeated destruction of a confirmed destroyed instance is supported; new launches
+require new names. Failed destruction is not proof of shutdown: inspect logs and
+retry. Returned socket paths are informational after successful cleanup.
+Always destroy before changing the environment/extension. Closing the shell or
+deactivating does not stop instances; reboot does not automatically restart them.
 
-Leaving the shell or deactivating the environment does not stop a running
-instance. Always destroy instances before replacing their extension or
-environment. A host reboot does not automatically restart them.
+### References
 
-### Dependency production and image composition
-
-The existing flow separates dependency production from application image creation:
-
-```text
-Pinned dependency sources + build tooling
-    -> dependency build script
-    -> bundle of prebuilt artifacts, configuration, and hashes
-
-Default or customer-provided bundle + application + init script
-    -> az ace create
-    -> composed initrd + IGVM + expected launch measurements
-```
-
-The referenced
-[build-igvm-dependencies.sh](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/scripts/build-igvm-dependencies.sh&version=GBfeature/modular-igvmfile-generation)
-builds the x86-64 measured-PCIe dependency baseline, not the application or final
-IGVM. It clones pinned OpenVMM and openvmm-deps revisions, or accepts clean local
-checkouts at those revisions. It applies the measured-PCIe patch, builds the SNP
-boot shim and `igvmfilegen` using Rust/Cargo, and builds the guest kernel and base
-initrd using Docker. It then stages the artifacts, generates a dependency
-manifest and checksums, and publishes a bundle directory.
-
-The script does **not** currently accept prebuilt kernel, boot-shim, or initrd
-paths. It also depends on companion scripts, a patch, an IGVM configuration,
-and shared repository logging code; it is not a standalone artifact packer
-that create can invoke unchanged.
-
-The CLI consumes the resulting artifact contract rather than invoking this
-source-build script. Its dependency reader requires a kernel, base initrd,
-SNP boot shim, `igvmfilegen`, and IGVM configuration. It validates the bundle's
-profile, architecture, artifact hashes, and measured-PCIe configuration.
-Create composes an initrd with the application and startup script, passes the
-selected resources to `igvmfilegen`, and reads the expected SNP measurement
-before publishing the IGVM.
-
-### What the create inputs contain and what customers can customize
-
-`--dependency-bundle`, `--application`, and `--init-script` are independent
-inputs. Keeping their sources in the same public repository does not mean
-they must be delivered through the same parameter.
-
-#### `--dependency-bundle`: boot dependencies, tooling, and configuration
-
-The parameter accepts a local bundle directory or tar/tar.gz archive, not a
-source checkout or a single kernel file. The current packaged bundle contains
-the following files. These are the default paths; the dependency manifest maps
-artifact names to bundle-relative paths and their SHA-256 hashes.
-
-| Component | Packaged path | Purpose and customization |
-| --- | --- | --- |
-| Guest kernel | `kernel/bzImage` | Linux kernel running inside the enclave. Customers can supply a compatible prebuilt kernel in a custom bundle. This is separate from the L1 host kernel/MSHV driver. |
-| Base initrd | `initrd/base-initrd.cpio.gz` | Compressed cpio archive providing the initial guest filesystem. Customers can change its files and guest utilities. Create subsequently installs the selected application and replaces `/init`. |
-| SNP boot shim | `openvmm/snp_bootshim` | Guest boot component used by the SNP Linux-direct image. Customers can replace it with a compatible prebuilt version. |
-| Image-generation tool | `openvmm/igvmfilegen` | Host executable that builds the IGVM and measurement sidecars; it is not the OpenVMM runtime or guest application. Custom bundles can replace it, but it must support the builder's command and output contract. |
-| IGVM configuration | `manifests/snp-linux-direct.json` | Describes the guest image, SNP settings, kernel command line, CPU/memory settings, and measured PCIe layout. Customers can supply compatible configuration, but launch still uses its fixed runtime resources and topology; editing the manifest does not reconfigure launch. Create explicitly sets guest debugging from its `--debug` flag. |
-| Kernel build records | `kernel/config`, `kernel/manifest.txt` | Record kernel configuration/build information. Included in the default bundle, but not required artifact names for the current CLI dependency reader. |
-| Tooling patch record | `patches/openvmm-igvmfilegen-measured-pcie.patch` | Records the measured-PCIe tooling patch. It is not applied or compiled by create. Included in the default bundle, but not a required artifact name for the dependency reader. |
-| Dependency manifest | `dependency-manifest.v1.json` | Required schema/profile/architecture metadata and artifact path/hash inventory. Customers rebuilding or replacing artifacts must update the inventory and hashes. |
-| Checksum inventory | `SHA256SUMS` | Additional checksum file produced by the dependency build pipeline. The CLI validates artifacts using the hashes in `dependency-manifest.v1.json`, not this file. |
-
-The five required artifact names are `kernel`, `base_initrd`, `snp_bootshim`,
-`igvmfilegen`, and `igvm_manifest`. Every artifact listed in the dependency
-manifest, including supplementary records if present, must exist and match
-its recorded hash. The current reader requires schema version 1,
-`measured-pcie-v1`, x86-64 artifacts, and an x64 IGVM configuration with a
-measured PCIe host bridge.
-
-Today, customers customize these components by preparing a complete compatible
-bundle and passing it to `--dependency-bundle`; individual kernel, boot-shim,
-and base-initrd options do not exist. Hash validation detects mismatches but
-does not authenticate a customer's bundle or prove its components will boot
-together. The bundle includes executable tooling and must be trusted.
-
-#### `--application`: the customer workload executable
-
-This parameter accepts **one prebuilt static x86-64 ELF executable**, not source
-code, a source directory, a container image, or an application dependency
-archive. The builder checks for a little-endian ELF64 x86-64 executable without
-a dynamic interpreter (`PT_INTERP`); this is a format check, not a full runtime
-compatibility guarantee.
-
-The selected binary is copied into the composed guest filesystem as
-`/bin/enclave_app`, regardless of its original filename. It replaces the default
-sample application, not the kernel, boot shim, or image-generation tool. The
-option does not compile code, install libraries, or specify startup arguments.
-Customers needing other guest files currently include them in a custom base
-initrd supplied through the bundle.
-
-The default `enclave_app` will live in the public dependencies repository, but
-it is currently a separate packaged file rather than an artifact selected from
-`dependencies.tar.gz`. Selecting a custom bundle does not automatically select
-an application or init script from that bundle.
-
-**How the referenced sample is built:** The
-[build-enclave-app.sh](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/scripts/build-enclave-app.sh&version=GBusers/kpostiglione/ace-skr-demo)
-script runs Cargo against the ACE workspace to build the `enclave_app` package
-with `--release --locked`. Its default target is
-`x86_64-unknown-linux-musl`, overridable through `TARGET`, and it prints the
-resulting binary path. It does not build the kernel, boot shim, base initrd,
-or final IGVM. The lockfile fixes dependency resolution, but reproducing the
-binary also requires controlling the toolchain and build environment.
-
-The script is a build wrapper, not the application itself. In the referenced
-sample source, `enclave_app` combines workload logic, HTTP/vsock request handling,
-attestation evidence collection, and key-release/signing functionality.
-The workspace already contains an `attested-protocol` crate with message types
-and report-binding helpers. These source-level components are compiled into
-the application; they are not separately selectable CLI inputs today.
-The sample's key-release functionality does not mean `az ace launch` performs
-key release or cryptographic attestation verification.
-
-#### `--init-script`: guest initialization and application startup
-
-The existing option replaces the entire guest `/init` with a customer-supplied
-shebang script using LF line endings. The default script mounts guest
-filesystems and runs `/bin/enclave_app serve-vsock 4050`. Customers can change
-startup arguments, environment variables, and guest initialization through
-their script, while supplying any required guest utilities separately.
-
-All three inputs must remain compatible with the current launch behavior:
-one virtual CPU, 160 MiB of memory, the configured PCIe/vsock layout, and the
-port-4050 JSON readiness exchange returning an SNP-shaped report. Replacing
-an application or startup script does not make launch generic. Changes to guest
-image contents/configuration can change the expected launch measurement.
-
-## Proposed component boundaries and required changes
-
-The following recommendations describe how to expose smaller customer-controlled
-components behind `--dependency-bundle` and `--application`. They are not new
-CLI capabilities or resolutions of the open build/distribution questions below.
-
-### Dependency customization behind `--dependency-bundle`
-
-Separate **dependency production**, **artifact selection**, and **image
-composition**. Keep source compilation in a documented build/release workflow.
-Create can accept compatible prebuilt artifacts without also running the full
-Docker/Rust dependency source-build pipeline.
-
-| Component group | Proposed customer control | Required change |
-| --- | --- | --- |
-| Guest kernel, base initrd, and SNP boot shim | Replace selected prebuilt guest components while retaining compatible defaults for the rest. | Introduce per-artifact inputs and an explicit resolution/validation contract so customers need not reconstruct a complete bundle for one replacement. No such individual options exist today. |
-| Image-generation tool and IGVM profile | Use a tested default tool/profile pair, with coordinated advanced replacement through a complete custom bundle. | Define and version the supported tool, image, and runtime compatibility contract. Do not treat arbitrary device-layout changes as compatible with launch. |
-| Manifest, hashes, and provenance | Inspect the resolved input set without manually maintaining every internal packaging detail. | Stage selected artifacts privately and generate a resolved manifest. Preserve default provenance separately from customer overrides; computed hashes alone do not authenticate inputs. |
-
-A bundle can remain the internal packaging format and the advanced full-set
-override. The customization benefit comes from selecting its components,
-not simply replacing an archive with loose files. Default distribution
-(packaged versus downloaded) remains a separate decision.
-
-### Application customization behind `--application`
-
-**Recommended starting point:** Keep one final static executable, but separate
-its source into reusable libraries and replaceable customer workload code.
-Customers should not have to adopt the entire sample merely to reuse its
-transport or evidence helpers.
-
-| Component | Current sample responsibility | Proposed customer control and required change |
-| --- | --- | --- |
-| Workload handler | Payload hashing and signed, attested-hash responses. | Extract a handler boundary so customers replace the sample computation with their own workload. Specify request/result and error contracts. |
-| Transport and dispatch | HTTP endpoints, newline-delimited JSON over vsock, and operation dispatch. | Provide a reusable default adapter while allowing a customer-owned transport. Separate transport code from workload operations. |
-| Attestation helpers | Device access for SNP/TDX evidence and application-data binding into report data. | Extract reusable evidence helpers with a documented binding contract. Do not confuse evidence collection with verification or imply that the CLI supports every sample evidence backend. |
-| Key-release/signing sample | Transport-key creation, released-key unwrapping, and JWT signing in `skr.rs`. | Make this an optional module/sample rather than a requirement for every workload. Keep key ownership and cryptographic binding explicit. |
-| Startup | Application command modes, with the packaged init script selecting `serve-vsock 4050`. | Preserve `--init-script` for arguments, environment, and guest initialization, independently of workload logic. |
-| Build recipe | A wrapper building one Cargo package for a default musl target. | Publish the sample source, lockfile, toolchain requirements, and build recipe in the public dependency/sample repository. Customers own their source/build pipeline and pass the resulting compatible executable to create. |
-
-Two customer paths follow from this design: adapt the sample by replacing its
-handler and reusing supported helpers, or bring an independently built compatible
-application with a matching init script. Rust libraries are an optional
-convenience for the first path, not a requirement for all customer applications.
-The existing `attested-protocol` crate is a starting point for the reusable
-contract, not proof that all of these boundaries are already implemented.
-
-**Required CLI integration:** Application protocol customization must be paired
-with a readiness design. The current launch probe requires the sample's
-port-4050 challenge/payload exchange and SNP-shaped response. Either retain that
-contract through a compatible adapter or introduce a separate configurable
-readiness mechanism before claiming arbitrary workload-protocol support.
-
-This recommendation does not require create to compile customer code. Splitting
-the sample into multiple guest processes is also not required initially; that
-would additionally need multi-file packaging, process supervision, IPC, and
-explicit evidence/key ownership across processes. Component changes that alter
-image contents require regenerating expected launch measurements.
-
-## Current-state references
-
-- [README and workflows](README.rst)
-- [Command registration](azext_ace/commands.py)
-- [Parameter registration](azext_ace/_params.py)
-- [CLI help](azext_ace/_help.py)
-- [Handlers, defaults, and returned results](azext_ace/custom.py)
-- [Host setup](azext_ace/_setup.py)
-- [Launch, guest readiness, and teardown](azext_ace/_lifecycle.py)
-- [Instance validation and locking](azext_ace/_instance.py)
-- [Image composition and dependency validation](azext_ace/_image_builder.py)
-- [Dependency source-build script](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/scripts/build-igvm-dependencies.sh&version=GBfeature/modular-igvmfile-generation)
-- [Sample application build script](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/scripts/build-enclave-app.sh&version=GBusers/kpostiglione/ace-skr-demo)
-- [Sample application source](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/enclave_app/src/main.rs&version=GBusers/kpostiglione/ace-skr-demo)
-- [Shared sample protocol](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/protocol/src/lib.rs&version=GBusers/kpostiglione/ace-skr-demo)
-
-## Open questions
-
-### 1. How should default dependencies be distributed?
-
-Should the defaults currently under `azext_ace/dependencies` be packaged with
-the extension or retrieved from the public dependency/sample repository?
-
-**Initial preference:** Retrieving them from the repository may make future
-updates easier to manage.
-
-### 2. What does the dependency triple include?
-
-Does the OneNote item, "Dependency triple should be built and packaged into the
-CLI," refer to the same artifacts we intend to store in the sample repository,
-or a different set of dependencies?
-
-### 3. Where should dependency and application builds happen?
-
-`az ace create` accepts `--dependency-bundle` and `--application`, each with
-specific format and content requirements. Reproducing compatible inputs may be
-difficult without the scripts currently in `ACC-CVM-Tooling`.
-
-Should those scripts move to the sample repository so customers can build their
-inputs independently, or should create perform those builds? If builds become
-part of create, the extension would need to pull all required scripts and
-supporting files, with their build-tool prerequisites documented.
-
-### 4. What responsibilities should create own?
-
-Related to question 3, should create only compose an IGVM from prebuilt inputs,
-or also build the dependency bundle, compile the enclave application, and
-configure the guest? Define the boundary between dependency production,
-application compilation, and image composition.
-
-### 5. Should launch and destroy remain largely unchanged?
-
-Can the abstraction work focus mainly on create while preserving the lifecycle
-interface? Launch currently requires an IGVM and an instance name; destroy
-requires the instance name and the original state root if customized.
-
-Confirm whether the current launch configuration and guest-readiness contract
-remain suitable for the intended customer workloads.
+- [Installation and usage](README.rst)
+- [Arguments](azext_ace/_params.py), [help](azext_ace/_help.py), and [handlers](azext_ace/custom.py)
+- [Image builder](azext_ace/_image_builder.py), [host setup](azext_ace/_setup.py), and [lifecycle](azext_ace/_lifecycle.py)
+- [Dependency build script](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/scripts/build-igvm-dependencies.sh&version=GBfeature/modular-igvmfile-generation)
+- [Application build script](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/scripts/build-enclave-app.sh&version=GBusers/kpostiglione/ace-skr-demo)
