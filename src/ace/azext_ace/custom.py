@@ -45,7 +45,7 @@ def create_ace(cmd: AzCliCommand, workspace: str, output_file: str,
             dependency_bundle=bundle,
             application=Path(application).expanduser() if application is not None else DEFAULT_APPLICATION,
             init_script=(Path(init_script) if init_script is not None
-                         else DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init'),
+                         else DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'),
             workspace=Path(workspace),
             output=Path(output_file),
             signing_key=Path(signing_key) if signing_key is not None else None,

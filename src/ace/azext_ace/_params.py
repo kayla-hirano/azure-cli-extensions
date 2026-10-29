@@ -19,7 +19,7 @@ def load_arguments(self, _):
                               'Defaults to the application packaged with the extension. '
                               'Use --init-script if your application needs different startup arguments.')
         context.argument('init_script', required=False,
-                         help='LF-only guest /init override. Defaults to the packaged SKR BVT script, '
+                         help='LF-only guest /init override. Defaults to the packaged enclave init script, '
                               'which mounts guest filesystems and starts /bin/enclave_app serve-vsock 4050.')
         context.argument('workspace', required=True,
                          help='Parent directory for a private build workspace; may already exist.')
@@ -36,7 +36,7 @@ def load_arguments(self, _):
             context.argument('state_dir', help='Private local instance directory root (mode 0700).')
             context.argument('timeout', type=float, help='Operation timeout in seconds.')
     with self.argument_context('ace launch') as context:
-        context.argument('igvm', required=True, help='Existing SKR BVT IGVM file on Linux L1.')
+        context.argument('igvm', required=True, help='Existing compatible SNP IGVM file on Linux L1.')
         context.argument('openvmm', help='OpenVMM executable path or command name.')
         context.argument('allow_untested_runtime', action='store_true',
                          help='Allow a runtime other than the expected Azure Linux 0.2.0-2.azl3 package. '

@@ -3,7 +3,7 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-"""Test BVT request parity, gRPC transport, guest probing, and lifecycle recovery without real L2 boot."""
+"""Test enclave configuration, gRPC transport, guest probing, and lifecycle recovery without real L2 boot."""
 
 import io
 import json
@@ -31,17 +31,17 @@ from azext_ace.rpc import vmservice_pb2 as vm
 class RpcContractTest(unittest.TestCase):
     """Check protobuf mapping and the wire contract independently of OpenVMM execution."""
 
-    def test_request_preserves_bvt_configuration(self):
-        """Round-trip the request and compare boot/resources/devices with the existing BVT."""
+    def test_request_preserves_enclave_configuration(self):
+        """Round-trip the request and verify the supported boot, resource, and device configuration."""
         directory = Path('/var/lib/ace/instances/demo')
-        request = _rpc.create_request(Path('/images/bvt.igvm'), directory, 'demo')
+        request = _rpc.create_request(Path('/images/enclave.igvm'), directory, 'demo')
         decoded = vm.CreateVMRequest.FromString(request.SerializeToString())
         config = decoded.config
         self.assertEqual(decoded.log_id, 'demo')
         self.assertEqual(config.WhichOneof('BootConfig'), 'igvm')
         self.assertEqual(config.igvm.personality, vm.IgvmBoot.PERSONALITY_LINUX_DIRECT)
         self.assertEqual(config.isolation_config.WhichOneof('isolation_type'), 'snp')
-        self.assertEqual(config.igvm.igvm_path, str(Path('/images/bvt.igvm')))
+        self.assertEqual(config.igvm.igvm_path, str(Path('/images/enclave.igvm')))
         self.assertEqual(config.memory_config.memory_mb, 160)
         self.assertEqual(config.processor_config.processor_count, 1)
         self.assertTrue(config.disable_vmbus)
@@ -99,7 +99,7 @@ class RpcContractTest(unittest.TestCase):
             with patch('azext_ace._rpc.grpc.insecure_channel', return_value=channel):
                 with _rpc.VmClient(Path('unused'), time.monotonic() + 5) as client:
                     client.ready()
-                    client.call('CreateVM', _rpc.create_request(Path('bvt'), Path('instance'), 'demo'))
+                    client.call('CreateVM', _rpc.create_request(Path('enclave'), Path('instance'), 'demo'))
                     self.assertEqual(client.call('PropertiesVM').state, vm.Running)
                     with self.assertRaisesRegex(CLIError, 'UNIMPLEMENTED'):
                         client.call('ResumeVM')
@@ -366,7 +366,7 @@ class GuestProbeTest(LinuxFilesystemTest):
                 self.assertFalse((directory / 'response.json').exists())
 
     def test_probe_accepts_only_snp_report_shape(self):
-        """Preserve the BVT request while rejecting mock, malformed, or incorrectly sized reports."""
+        """Preserve the guest request while rejecting mock, malformed, or incorrectly sized reports."""
         for evidence in (
                 {'tee': 'snp', 'report': '00' * 1184},
                 {'tee': 'mock', 'report': None},
@@ -458,7 +458,7 @@ class LifecycleTest(LinuxFilesystemTest):
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
         self.directory = self.base / 'demo'
-        self.image = self.base / 'bvt.igvm'
+        self.image = self.base / 'enclave.igvm'
         self.image.write_bytes(b'test image')
         self.executable = self.base / 'openvmm'
         self.executable.write_bytes(b'test executable')

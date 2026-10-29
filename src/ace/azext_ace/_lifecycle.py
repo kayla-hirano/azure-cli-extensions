@@ -78,7 +78,7 @@ def read_line(stream: Union[BufferedReader, BufferedRWPair], connection: Optiona
 
 
 def probe_guest(directory: Path, deadline: float) -> None:
-    """Retry the BVT guest exchange and save an SNP-shaped response without verifying attestation."""
+    """Retry the guest readiness exchange and save an SNP-shaped response without verifying attestation."""
     last_error = 'Guest relay has not become available.'
     challenge = secrets.token_hex(32)
     while time.monotonic() < deadline:
@@ -90,7 +90,6 @@ def probe_guest(directory: Path, deadline: float) -> None:
                 connection.settimeout(min(5, max(0.01, deadline - time.monotonic())))
                 connection.connect(str(directory / 'vsock.sock'))
                 with connection.makefile('rwb') as stream:
-                    # Same CONNECT handshake and JSON request as skr-bvt-client.py.
                     stream.write('CONNECT {}\n'.format(GUEST_VSOCK_PORT).encode('ascii'))
                     stream.flush()
                     if not read_line(stream, connection, deadline).startswith(b'OK '):

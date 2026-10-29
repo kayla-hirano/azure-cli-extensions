@@ -25,11 +25,11 @@ HOST_STATE_DIR = '/run/ace'
 
 
 def require_host(timeout: float) -> None:
-    """Require the Linux/root execution environment used by the BVT and a valid timeout."""
+    """Require the local Linux/root execution environment and a valid timeout."""
     if sys.platform != 'linux':
         raise CLIError('ACE launch/destroy must run locally on Linux L1.')
     if os.geteuid() != 0:
-        raise CLIError('Run ACE launch/destroy as root on L1, as with run-skr-bvt.sh.')
+        raise CLIError('Run ACE launch/destroy as root on L1.')
     if not math.isfinite(timeout) or timeout <= 0:
         raise CLIError('--timeout must be a finite positive number of seconds.')
 

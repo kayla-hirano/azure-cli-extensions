@@ -59,7 +59,7 @@ class CreateCommandTest(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(result)), result)
         build.assert_called_once_with(
             dependency_bundle=Path('bundle'), application=custom.DEFAULT_APPLICATION,
-            init_script=custom.DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init', workspace=Path('work'),
+            init_script=custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init', workspace=Path('work'),
             output=Path('image.igvm'), signing_key=None, debug=False, enable_debug=False,
             logger=custom.logger)
 
@@ -137,10 +137,11 @@ class CreateCommandTest(unittest.TestCase):
         self.assertIsNone(arguments['dependency_bundle'].options['default'])
         self.assertEqual(arguments['application'].options_list, ['--application'])
         self.assertIsNone(arguments['application'].options['default'])
-        default_init = custom.DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init'
+        default_init = custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'
         script = default_init.read_bytes()
         self.assertTrue(script.startswith(b'#!/bin/sh\n'))
         self.assertNotIn(b'\r', script)
+        self.assertIn(b'echo "Starting enclave application"\n', script)
         self.assertIn(b'exec /bin/enclave_app serve-vsock 4050\n', script)
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(Path('image.igvm'), self.measurements)) as build:
@@ -204,7 +205,7 @@ class CreateCommandTest(unittest.TestCase):
                               application='custom-app')
         self.assertEqual(build.call_args.kwargs['application'], Path('custom-app'))
         self.assertEqual(build.call_args.kwargs['init_script'],
-                         custom.DEPENDENCIES_DIR / 'initramfs' / 'skr-bvt-init')
+                         custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init')
 
     def test_archive_override_is_forwarded_without_requiring_packaged_bundle(self) -> None:
         with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(

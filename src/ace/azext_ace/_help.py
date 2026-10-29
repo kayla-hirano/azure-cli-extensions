@@ -40,21 +40,21 @@ helps['ace create'] = """
         Defaults to the packaged dependency archive; --dependency-bundle overrides it with an archive or directory.
         Defaults to the packaged application; --application overrides it with a static x86-64 ELF binary.
         The application is installed as /bin/enclave_app in the guest.
-        Defaults to the packaged SKR BVT init script; use --init-script to override guest startup.
+        Defaults to the packaged enclave init script; use --init-script to override guest startup.
         Does not compile workloads or dependencies, install tools, or launch a VM.
         Only the final IGVM is published; an existing output is never overwritten.
         Guest debugging is disabled by default. --debug enables SNP guest debugging and diagnostic logs.
         --keep-intermediates independently retains the build workspace.
         Returns expected SNP launch measurements.
     examples:
-      - name: Create an image using the packaged SKR BVT init script.
+      - name: Create an image using the packaged enclave init script.
         text: >
             az ace create --workspace /home/user/ace-build
             --output-file /home/user/images/enclave.igvm
       - name: Supply your own bundle, override guest startup, sign, and retain intermediate files.
         text: >
             az ace create --dependency-bundle /opt/ace/dependencies.tar.gz
-            --init-script /home/user/skr-bvt-init --workspace /home/user/ace-build
+            --init-script /home/user/enclave-init --workspace /home/user/ace-build
             --output-file /home/user/images/signed.igvm --signing-key /home/user/test-id-key.pem
             --keep-intermediates
       - name: Create a debug-enabled guest image and show diagnostic logs.
@@ -72,7 +72,7 @@ helps['ace launch'] = """
     type: command
     short-summary: Create and launch the enclave VM from the IGVM file using OpenVMM RPC.
     long-summary: >
-        Run as root on Linux L1. Uses the SKR BVT's fixed CPU, memory, PCIe and vsock configuration.
+        Run as root on Linux L1. Uses a fixed CPU, memory, PCIe and vsock configuration.
         Starts a persistent local OpenVMM gRPC server, creates an SNP IGVM VM and resumes it.
         Allows only one active ACE enclave per L1, regardless of name or state directory.
         Destroy the existing instance before launching another.
@@ -80,8 +80,8 @@ helps['ace launch'] = """
         Logs and instance state remain under the state directory.
         Returns the enclave name, status, vsock port and relay socket, RPC socket, log paths, and evidence paths.
     examples:
-      - name: Launch an existing SKR BVT image on L1.
-        text: az ace launch --name demo --igvm /home/user/skr-bvt/skr-bvt.igvm --openvmm /usr/bin/openvmm
+      - name: Launch an existing compatible SNP image on L1.
+        text: az ace launch --name demo --igvm /home/user/images/enclave.igvm --openvmm /usr/bin/openvmm
 """
 
 helps['ace destroy'] = """

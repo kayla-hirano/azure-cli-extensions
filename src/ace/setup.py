@@ -62,6 +62,6 @@ setup(
     package_data={'azext_ace': [
         'azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi',
         'dependencies/dependencies.tar.gz', 'dependencies/enclave_app',
-        'dependencies/initramfs/skr-bvt-init',
+        'dependencies/initramfs/enclave-init',
     ]},
 )

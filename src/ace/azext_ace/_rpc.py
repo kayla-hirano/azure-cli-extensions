@@ -3,7 +3,7 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-"""Translate BVT launch settings to the pinned protobuf contract and issue bounded local gRPC calls."""
+"""Translate enclave launch settings to the pinned protobuf contract and issue bounded local gRPC calls."""
 
 import time
 from pathlib import Path
@@ -17,7 +17,7 @@ from .rpc import vmservice_pb2 as vm
 
 
 def create_request(image: Path, directory: Path, name: str) -> vm.CreateVMRequest:
-    """Build the RPC equivalent of the BVT's SNP IGVM, COM1, CPU, memory, and PCIe arguments."""
+    """Build an SNP IGVM request with the supported COM1, CPU, memory, and PCIe configuration."""
     request = vm.CreateVMRequest(log_id=name)
     config = request.config
     config.igvm.igvm_path = str(image)
@@ -28,9 +28,9 @@ def create_request(image: Path, directory: Path, name: str) -> vm.CreateVMReques
     config.disable_hv = False
     config.memory_config.memory_mb = 160
     config.processor_config.processor_count = 1
-    # COM1 is zero-indexed in RPC. The supervisor replaces the BVT's --com1 file=... backend.
+    # COM1 is zero-indexed in RPC and connects to the supervisor's serial listener.
     config.serial_config.ports.add(port=0, socket_path=str(directory / 'serial.sock'), connect=True)
-    # Match run-skr-bvt.sh and the measured pcie_host_bridge in snp-linux-direct-skr-bvt.json.
+    # The PCIe layout must match the image's measured pcie_host_bridge configuration.
     root = config.pcie.root_complexes.add(
         name='rc0', segment=0, start_bus=0, end_bus=1,
         low_mmio=16 * 1024 * 1024, low_mmio_base=0xf7000000,

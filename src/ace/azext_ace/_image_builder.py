@@ -379,7 +379,7 @@ def build_igvm(
     static PIE). This is a basic format check, not a complete ABI verifier.
     ``init_script`` is the caller's LF-terminated shebang script; it owns
     mounts and arguments and must ultimately execute /bin/enclave_app.
-    The CLI supplies dependencies/initramfs/skr-bvt-init.
+    The CLI supplies dependencies/initramfs/enclave-init.
     No app arguments are generic defaults.
 
     With ``signing_key=None``, no SNP ID block is embedded. Otherwise,

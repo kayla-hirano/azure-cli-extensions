@@ -89,13 +89,18 @@ The packaged inputs are under ``azext_ace/dependencies/``:
   and artifact hashes.
 * ``enclave_app``: the static x86-64 application installed as
   ``/bin/enclave_app``.
-* ``initramfs/skr-bvt-init``: the default guest startup script, which starts
+* ``initramfs/enclave-init``: the default guest startup script, which starts
   the application on guest vsock port 4050.
 
 Guest debugging is disabled by default, regardless of the bundle's setting.
 ``--debug`` enables both SNP guest debugging and diagnostic logs, so use it
 only when a debug-enabled guest is intended. ``--verbose`` changes logging
 only. Neither logging flag retains the workspace by itself.
+
+The default startup script is now named ``enclave-init`` and uses a
+customer-neutral startup banner. Rebuilding an image with changed script
+contents can change its expected launch measurement; use the measurements
+returned by create for the rebuilt image. Existing IGVM files are unchanged.
 
 Optional overrides
 ^^^^^^^^^^^^^^^^^^
