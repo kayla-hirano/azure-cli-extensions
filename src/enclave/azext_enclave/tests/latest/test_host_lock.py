@@ -21,17 +21,17 @@ from azext_enclave import _instance
 class HostLockTest(unittest.TestCase):
     """Keep all state roots in one slot and retain it across process handoff."""
 
-    def test_rename_preserves_legacy_state_paths(self) -> None:
-        self.assertEqual(_instance.DEFAULT_STATE_DIR, '/var/lib/ace/instances')
-        self.assertEqual(_instance.HOST_STATE_DIR, '/run/ace')
+    def test_default_state_paths_use_enclave(self) -> None:
+        self.assertEqual(_instance.DEFAULT_STATE_DIR, '/var/lib/enclave/instances')
+        self.assertEqual(_instance.HOST_STATE_DIR, '/run/enclave')
 
     def test_guard_uses_fixed_host_location(self) -> None:
-        directory = Path('/run/ace/enclave')
+        directory = Path('/run/enclave/enclave')
         with patch('azext_enclave._instance.instance_path', return_value=directory) as path, \
                 patch('azext_enclave._instance.instance_lock', return_value=nullcontext(47)) as lock:
             with _instance.host_lock() as descriptor:
                 self.assertEqual(descriptor, 47)
-        path.assert_called_once_with('/run/ace', 'enclave')
+        path.assert_called_once_with('/run/enclave', 'enclave')
         self.assertEqual(lock.call_args.args[0], directory)
         self.assertIn('Destroy the existing instance', lock.call_args.args[1])
 

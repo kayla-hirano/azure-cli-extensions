@@ -1,8 +1,10 @@
 # Enclave extension improvements
 
 **Naming:** The extension is `enclave`, its Python package is `azext_enclave`,
-and its commands use `az enclave`. The existing `/var/lib/ace/instances` state
-root and `/run/ace` host lock are retained for compatibility. The separate
+and its commands use `az enclave`. The default state root is
+`/var/lib/enclave/instances` and the host lock is `/run/enclave/enclave.lock`.
+Stop all old runtimes and retire old installations before upgrading; state is
+not automatically migrated and mixed-version launches are not supported. The separate
 ACC-CVM-Tooling `src/ace` sample directory is unchanged.
 
 ## 1. Objective and scope
@@ -249,7 +251,7 @@ for every future dependency release.
 
 | Area | Remaining work |
 | --- | --- |
-| Naming | Use `enclave` for the extension and command group, and `azext_enclave` for the Python package. Preserve existing runtime state and host-lock paths; stop managed instances before replacing the old extension installation. |
+| Naming | Use `enclave` for the extension and command group, and `azext_enclave` for the Python package. State uses `/var/lib/enclave/instances` and the host guard uses `/run/enclave/enclave.lock`. Stop old runtimes and retire old installations before upgrading; no automatic state migration or mixed-version launches. |
 | Resource retrieval | Add the `setup.py` placeholder first, then connect it to external releases during wheel construction, with integrity checks, recorded release identity, and explicit errors. The external release owns component versions; release/compatibility selection remains TBD. Verify retrieval in the wheel-build workflow, not during customer installation. |
 | Default migration and overrides | Keep current defaults until retrieval works; replace locally maintained resource payloads with build-fetched resources while retaining their inclusion in the wheel. Package all required defaults published before extension release. Preserve per-resource parameter precedence and customer compatibility responsibilities. The stub must not pretend retrieval succeeded. |
 | Pipeline and create contract | Run the existing dependency-build script in the pipeline and publish its bundle, including the triple, tooling/profile, and metadata. Reuse existing validation, composition, and optional signing; do not compile dependencies or applications in create. |
@@ -455,11 +457,15 @@ This is not attestation verification.
 
 #### State, endpoints, and ownership
 
-The default state root remains `/var/lib/ace/instances` for compatibility with
-the rename. A custom `--state-dir` changes the instance root, not the host guard.
+The default state root is `/var/lib/enclave/instances`. A custom `--state-dir`
+changes the instance root, not the host guard. Old records remain under
+`/var/lib/ace/instances` and require an explicit `--state-dir` for teardown.
+Never move live instance directories. Stop old runtimes and retire old
+installations before upgrading: their different host lock cannot coordinate
+with the new guard.
 
 ```text
-/run/ace/enclave.lock                host-wide runtime guard
+/run/enclave/enclave.lock            host-wide runtime guard
 
 <state-dir>/<name>.lock              per-instance command lock
 <state-dir>/<name>/                  private instance directory (0700)
@@ -613,7 +619,7 @@ gRPC, and probes the guest through the vsock relay. Both processes outlive the C
 | `--name`, `-n` | Yes | None | 1-32 characters; starts with a letter/digit, then letters/digits/underscores/hyphens. Existing instance directories cannot be reused, even after destroy. |
 | `--igvm` | Yes | None | Existing compatible IGVM on L1; create output or a customer-provided image. |
 | `--openvmm` | No | `openvmm` | Executable path or name resolved through the executable search path. |
-| `--state-dir` | No | `/var/lib/ace/instances` | Private root-owned state root with mode `0700`. Symlinked paths are rejected; length must fit Unix socket limits. |
+| `--state-dir` | No | `/var/lib/enclave/instances` | Private root-owned state root with mode `0700`. Symlinked paths are rejected; length must fit Unix socket limits. |
 | `--timeout` | No | `120` seconds | Finite positive operation timeout; fractional seconds accepted. |
 | `--allow-untested-runtime` | No | `false` | Permit a runtime outside the expected Azure Linux `0.2.0-2.azl3` package; equivalent SNP IGVM RPC and low-ECAM support are still required. |
 
@@ -644,7 +650,7 @@ sockets. Input IGVM, instance record, logs, and saved evidence remain.
 | Parameter | Required | Default | Behavior |
 | --- | --- | --- | --- |
 | `--name`, `-n` | Yes | None | Existing instance name, using launch's naming rules. |
-| `--state-dir` | No | `/var/lib/ace/instances` | Must match launch; same privacy/path constraints. |
+| `--state-dir` | No | `/var/lib/enclave/instances` | Must match launch; same privacy/path constraints. |
 | `--timeout` | No | `30` seconds | Finite positive timeout; fractional seconds accepted. Cleanup has additional bounded grace periods. |
 
 Repeated destruction of a confirmed destroyed instance is supported; new launches

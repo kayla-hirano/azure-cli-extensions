@@ -33,7 +33,7 @@ class RpcContractTest(unittest.TestCase):
 
     def test_request_preserves_enclave_configuration(self):
         """Round-trip the request and verify the supported boot, resource, and device configuration."""
-        directory = Path('/var/lib/ace/instances/demo')
+        directory = Path('/var/lib/enclave/instances/demo')
         request = _rpc.create_request(Path('/images/enclave.igvm'), directory, 'demo')
         decoded = vm.CreateVMRequest.FromString(request.SerializeToString())
         config = decoded.config
@@ -60,7 +60,7 @@ class RpcContractTest(unittest.TestCase):
 
     def test_unix_channel_uses_valid_http2_authority(self) -> None:
         """Keep the socket path out of the authority header rejected by OpenVMM's HTTP/2 server."""
-        path = Path('/var/lib/ace/instances/demo/rpc.sock')
+        path = Path('/var/lib/enclave/instances/demo/rpc.sock')
         with patch('azext_enclave._rpc.grpc.insecure_channel') as channel:
             with _rpc.VmClient(path, time.monotonic() + 5):
                 channel.assert_called_once_with(

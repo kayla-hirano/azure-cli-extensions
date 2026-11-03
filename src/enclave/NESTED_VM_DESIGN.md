@@ -3,8 +3,9 @@
 **Status:** Proposed, not implemented. This is a separate expansion of the
 scope in [DESIGN.md](DESIGN.md), not a claim that other nested VM types work
 today. The extension and command group are named `enclave`, and the Python
-package is `azext_enclave`. Existing runtime state and host-lock paths are
-retained for compatibility.
+package is `azext_enclave`. Runtime state uses `/var/lib/enclave/instances`
+and the host guard uses `/run/enclave/enclave.lock`. Upgrading requires stopping
+old runtimes and retiring old installations; state is not automatically migrated.
 
 ## 1. Current design support
 

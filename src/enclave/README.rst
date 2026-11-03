@@ -5,24 +5,27 @@ Azure CLI Enclave Extension
 lets you generate launch artifacts with ``az enclave create`` or bring your own
 compatible IGVM. Enclave is not yet a general-purpose image launcher.
 
-Renaming from ACE
------------------
+Runtime path migration
+----------------------
 
-The extension is now named ``enclave`` and commands use ``az enclave``.
-Stop existing managed instances with ``az ace destroy`` before replacing the
-old installation or moving its checkout. Remove the old extension from each
-CLI configuration where it was installed (``az extension remove --name ace``),
-then install the new wheel or rerun the developer bootstrap below. The rename
-is a new distribution name, not an in-place upgrade of ``ace``.
+The default instance root is now ``/var/lib/enclave/instances`` and the
+host-wide runtime lock is ``/run/enclave/enclave.lock``.
+This is a clean switch, not automatic state migration or mixed-version support.
 
-Developer bootstrap now uses ``ENCLAVE_REPO``, ``ENCLAVE_VENV``,
-``enclave-dev``, and ``activate-enclave.sh``. Update root's
-``extension.dev_sources`` to the new checkout path as shown below.
-The default runtime state directory remains ``/var/lib/ace/instances`` and
-the host-wide lock remains under ``/run/ace`` so old and new installations
-share the same host guard. Existing images and instance records are unchanged.
-The separate ACC-CVM-Tooling ``src/ace`` sample directory is not renamed;
-its demo runner now uses ``--enclave-cli`` and ``--enclave-venv``.
+Before upgrading, destroy every managed instance using the old installation
+and its original state directory. Confirm its OpenVMM and supervisor processes
+have exited, then retire all old extension installations and environments on
+that host before launching with the new version. Old installations use a
+different host lock and must not launch alongside the new version, even with
+different names or custom ``--state-dir`` values.
+
+Existing files are not moved or deleted. Old records and evidence remain under
+``/var/lib/ace/instances``; the new default does not discover them. If teardown
+must be retried after upgrading, use ``az enclave destroy --name <name>
+--state-dir /var/lib/ace/instances`` with the original runtime environment
+still available. Do not move live instance directories, delete active lock
+files, or use symlinks as a migration shortcut. Retain root ownership and
+mode ``0700`` for state directories. Existing IGVM images are unchanged.
 
 Initial set up for development environment
 -------------------------------
@@ -240,7 +243,7 @@ enter these directories; use sudo to read the evidence directly without
 changing directories::
 
     sudo "$ENCLAVE_VENV/bin/python" -m json.tool \
-        /var/lib/ace/instances/demo-1/response.json
+        /var/lib/enclave/instances/demo-1/response.json
 
 ``evidence.report`` is the hex-encoded 1184-byte SNP report. Enclave checks the
 report's shape, **not** its signature, measurement, challenge binding, or
@@ -255,7 +258,7 @@ To browse all results without sudo, copy the instance directory after a
 successful destroy, when logs have stopped changing and runtime sockets have
 been removed. Choose a destination that does not already exist::
 
-    sudo cp -a -- /var/lib/ace/instances/demo-1 "$HOME/demo-1-results"
+    sudo cp -a -- /var/lib/enclave/instances/demo-1 "$HOME/demo-1-results"
     sudo chown -R -- "$(id -u):$(id -g)" "$HOME/demo-1-results"
     cd "$HOME/demo-1-results"
     python -m json.tool response.json

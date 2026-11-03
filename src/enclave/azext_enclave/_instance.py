@@ -20,9 +20,8 @@ from typing import Dict, Iterator, Optional
 
 from knack.util import CLIError
 
-# Retain legacy paths so old and new installations share state and the host guard.
-DEFAULT_STATE_DIR = '/var/lib/ace/instances'
-HOST_STATE_DIR = '/run/ace'
+DEFAULT_STATE_DIR = '/var/lib/enclave/instances'
+HOST_STATE_DIR = '/run/enclave'
 
 
 def require_host(timeout: float) -> None:

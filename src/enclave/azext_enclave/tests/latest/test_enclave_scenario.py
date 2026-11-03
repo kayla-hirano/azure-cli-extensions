@@ -63,9 +63,14 @@ class EnclaveCommandTest(unittest.TestCase):
         with patch('azext_enclave._lifecycle.launch', return_value={'status': 'running'}) as launch:
             self.assertEqual(custom.launch_enclave('demo', 'demo.igvm'), {'status': 'running'})
             launch.assert_called_once_with(
-                'demo', 'demo.igvm', 'openvmm', '/var/lib/ace/instances', 120, False)
+                'demo', 'demo.igvm', 'openvmm', '/var/lib/enclave/instances', 120, False)
         with patch('azext_enclave._lifecycle.destroy', return_value={'status': 'destroyed'}) as destroy:
             self.assertEqual(custom.destroy_enclave('demo'), {'status': 'destroyed'})
+            destroy.assert_called_once_with('demo', '/var/lib/enclave/instances', 30)
+
+    def test_destroy_forwards_explicit_old_state_root(self) -> None:
+        with patch('azext_enclave._lifecycle.destroy', return_value={'status': 'destroyed'}) as destroy:
+            custom.destroy_enclave('demo', state_dir='/var/lib/ace/instances')
             destroy.assert_called_once_with('demo', '/var/lib/ace/instances', 30)
 
     def test_setup_delegation(self) -> None:

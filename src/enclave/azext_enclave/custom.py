@@ -70,7 +70,7 @@ def _instance_result(state: dict) -> dict:
 
 
 def launch_enclave(name: str, igvm: str, openvmm: str = 'openvmm',
-                   state_dir: str = '/var/lib/ace/instances', timeout: float = 120,
+                   state_dir: str = '/var/lib/enclave/instances', timeout: float = 120,
                    allow_untested_runtime: bool = False) -> dict:
     """Delegate local RPC launch and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import launch
@@ -80,7 +80,7 @@ def launch_enclave(name: str, igvm: str, openvmm: str = 'openvmm',
         raise CLIError('Unable to launch Enclave instance: {}'.format(error)) from error
 
 
-def destroy_enclave(name: str, state_dir: str = '/var/lib/ace/instances', timeout: float = 30) -> dict:
+def destroy_enclave(name: str, state_dir: str = '/var/lib/enclave/instances', timeout: float = 30) -> dict:
     """Delegate instance teardown and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import destroy
     try:
