@@ -5,28 +5,6 @@ Azure CLI Enclave Extension
 lets you generate launch artifacts with ``az enclave create`` or bring your own
 compatible IGVM. Enclave is not yet a general-purpose image launcher.
 
-Runtime path migration
-----------------------
-
-The default instance root is now ``/var/lib/enclave/instances`` and the
-host-wide runtime lock is ``/run/enclave/enclave.lock``.
-This is a clean switch, not automatic state migration or mixed-version support.
-
-Before upgrading, destroy every managed instance using the old installation
-and its original state directory. Confirm its OpenVMM and supervisor processes
-have exited, then retire all old extension installations and environments on
-that host before launching with the new version. Old installations use a
-different host lock and must not launch alongside the new version, even with
-different names or custom ``--state-dir`` values.
-
-Existing files are not moved or deleted. Old records and evidence remain under
-``/var/lib/ace/instances``; the new default does not discover them. If teardown
-must be retried after upgrading, use ``az enclave destroy --name <name>
---state-dir /var/lib/ace/instances`` with the original runtime environment
-still available. Do not move live instance directories, delete active lock
-files, or use symlinks as a migration shortcut. Retain root ownership and
-mode ``0700`` for state directories. Existing IGVM images are unchanged.
-
 Initial set up for development environment
 -------------------------------
 

@@ -5,12 +5,15 @@
 
 """Verify Azure CLI registration, help, arguments, and delegation without launching a VM."""
 
+import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from knack.util import CLIError
 from azure.cli.core import get_default_cli
+from azure.cli.core.extension import ext_compat_with_cli
 
 from azext_enclave import EnclaveCommandsLoader
 from azext_enclave import custom
@@ -19,6 +22,16 @@ from azext_enclave._help import helps
 
 class EnclaveCommandTest(unittest.TestCase):
     """Exercise the extension loader and public command-handler boundary."""
+
+    def test_cli_core_version_compatibility(self) -> None:
+        metadata_path = Path(__file__).resolve().parents[2] / 'azext_metadata.json'
+        metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+        self.assertNotIn('azext.maxCliCoreVersion', metadata)
+        for version, compatible in (
+                ('2.0.66', False), ('2.0.67', True), ('2.91.0', True),
+                ('2.92.0', True), ('2.93.0', True), ('3.0.0', True)):
+            with self.subTest(version=version), patch('azure.cli.core.__version__', version):
+                self.assertEqual(ext_compat_with_cli(metadata)[0], compatible)
 
     def test_command_registration(self):
         """Keep the advertised command set stable while lifecycle implementations evolve."""
