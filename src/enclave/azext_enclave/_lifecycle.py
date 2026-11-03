@@ -167,7 +167,7 @@ def _start_supervisor(directory: Path, state: dict, host_lock_fd: int) -> None:
         os.pathsep + environment['PYTHONPATH'] if environment.get('PYTHONPATH') else '')
     with (directory / 'supervisor.log').open('ab') as log:
         worker = subprocess.Popen(
-            [sys.executable, '-m', 'azext_ace._worker', str(directory), str(host_lock_fd)],
+            [sys.executable, '-m', 'azext_enclave._worker', str(directory), str(host_lock_fd)],
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
             env=environment, start_new_session=True, close_fds=True, pass_fds=(host_lock_fd,))
     state['supervisor'] = identity(worker.pid)
@@ -273,11 +273,11 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
     directory = instance_path(state_dir, name)
     with instance_lock(directory):
         if not directory.exists():
-            raise CLIError('ACE instance not found: {}'.format(name))
+            raise CLIError('Enclave instance not found: {}'.format(name))
         check_private(directory)
         state = read_record(directory / 'instance.json')
         if state.get('schema') != 1 or state.get('name') != name:
-            raise CLIError('Unsupported or mismatched ACE instance record.')
+            raise CLIError('Unsupported or mismatched Enclave instance record.')
         state.update(_instance_info(directory))
         # Match full process identities, not just PIDs, before trusting the management endpoint.
         runtime_path = directory / 'runtime.json'

@@ -1,46 +1,65 @@
-Azure CLI ACE Extension
-======================
+Azure CLI Enclave Extension
+===========================
 
-``az ace`` manages local SNP enclave VMs using OpenVMM. The intended workflow
-lets you generate launch artifacts with ``az ace create`` or bring your own
-compatible IGVM. ACE is not yet a general-purpose image launcher.
+``az enclave`` manages local SNP enclave VMs using OpenVMM. The intended workflow
+lets you generate launch artifacts with ``az enclave create`` or bring your own
+compatible IGVM. Enclave is not yet a general-purpose image launcher.
+
+Renaming from ACE
+-----------------
+
+The extension is now named ``enclave`` and commands use ``az enclave``.
+Stop existing managed instances with ``az ace destroy`` before replacing the
+old installation or moving its checkout. Remove the old extension from each
+CLI configuration where it was installed (``az extension remove --name ace``),
+then install the new wheel or rerun the developer bootstrap below. The rename
+is a new distribution name, not an in-place upgrade of ``ace``.
+
+Developer bootstrap now uses ``ENCLAVE_REPO``, ``ENCLAVE_VENV``,
+``enclave-dev``, and ``activate-enclave.sh``. Update root's
+``extension.dev_sources`` to the new checkout path as shown below.
+The default runtime state directory remains ``/var/lib/ace/instances`` and
+the host-wide lock remains under ``/run/ace`` so old and new installations
+share the same host guard. Existing images and instance records are unchanged.
+The separate ACC-CVM-Tooling ``src/ace`` sample directory is not renamed;
+its demo runner now uses ``--enclave-cli`` and ``--enclave-venv``.
 
 Initial set up for development environment
 -------------------------------
 
 Use Azure Linux 3.0 L1 with a compatible kernel exposing ``/dev/mshv``.
-Have Python 3.12 with pip/venv, git, sudo, and a checkout containing ACE ready.
+Have Python 3.12 with pip/venv, git, sudo, and a checkout containing Enclave ready.
 No Azure login is required.
 
 Run the developer bootstrap as your normal user, adjusting the paths if needed::
 
-    export ACE_REPO="$HOME/azure-cli-extensions"
-    export ACE_VENV="$HOME/.venvs/ace-dev"
-    bash "$ACE_REPO/src/ace/scripts/bootstrap-dev.sh"
-    source "$ACE_VENV/activate-ace.sh"
+    export ENCLAVE_REPO="$HOME/azure-cli-extensions"
+    export ENCLAVE_VENV="$HOME/.venvs/enclave-dev"
+    bash "$ENCLAVE_REPO/src/enclave/scripts/bootstrap-dev.sh"
+    source "$ENCLAVE_VENV/activate-enclave.sh"
 
 ``bootstrap-dev.sh`` creates a virtual environment, configures azdev with isolated
-Azure CLI directories, and installs ACE in editable mode with its Python
+Azure CLI directories, and installs Enclave in editable mode with its Python
 dependencies. Register the same editable extension in root's separate CLI
 configuration once::
 
-    sudo env AZURE_CONFIG_DIR=/root/.azure-ace \
+    sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" config set \
-        extension.dev_sources="$ACE_REPO/src/ace"
+        "$ENCLAVE_VENV/bin/az" config set \
+        extension.dev_sources="$ENCLAVE_REPO/src/enclave"
 
 Then prepare the host::
 
-    sudo env AZURE_CONFIG_DIR=/root/.azure-ace \
+    sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" ace setup
+        "$ENCLAVE_VENV/bin/az" enclave setup
 
 Always use the virtual environment's absolute ``az`` path under sudo, not
 plain ``sudo az``. This runs your checkout and dependencies as root: use
 trusted code in directories not writable by untrusted users.
 
 Why separate setup? ``setup.py`` installs Python runtime dependencies with the extension.
-``az ace setup`` handles privileged host dependencies, not its own installation.
+``az enclave setup`` handles privileged host dependencies, not its own installation.
 Keeping them separate avoids changing your Python environment as root.
 
 Set up to resume testing
@@ -49,14 +68,14 @@ Set up to resume testing
 In a new terminal or SSH session, restore the same paths and activate the
 existing environment; no bootstrap or package installation is needed::
 
-    export ACE_VENV="$HOME/.venvs/ace-dev"
-    source "$ACE_VENV/activate-ace.sh"
+    export ENCLAVE_VENV="$HOME/.venvs/enclave-dev"
+    source "$ENCLAVE_VENV/activate-enclave.sh"
 
 Source edits take effect on the next CLI invocation. If dependencies or
 packaging metadata change, stop managed instances before rerunning bootstrap.
 Do not remove or update their environment/checkout while they are running.
 Existing environments created without the bootstrap need one bootstrap run
-to generate ``activate-ace.sh``.
+to generate ``activate-enclave.sh``.
 
 Extension commands
 --------
@@ -67,9 +86,9 @@ Setup
 Validate Azure Linux 3.0 and ``/dev/mshv``, install
 ``openvmm-0.2.0-2.azl3`` if absent, and verify its RPM version and integrity::
 
-    sudo env AZURE_CONFIG_DIR=/root/.azure-ace \
+    sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" ace setup
+        "$ENCLAVE_VENV/bin/az" enclave setup
 
 Create
 ~~~~~~
@@ -78,11 +97,11 @@ Build an IGVM using the dependency archive, enclave application, and init
 script packaged with the extension. Run as your normal user on Linux L1
 with GNU cpio and gzip installed::
 
-    "$ACE_VENV/bin/az" ace create \
-        --workspace "$HOME/ace-build" \
+    "$ENCLAVE_VENV/bin/az" enclave create \
+        --workspace "$HOME/enclave-build" \
         --output-file "$HOME/images/enclave.igvm"
 
-The packaged inputs are under ``azext_ace/dependencies/``:
+The packaged inputs are under ``azext_enclave/dependencies/``:
 
 * ``dependencies.tar.gz``: the trusted ``measured-pcie-v1`` bundle containing
   the kernel, base initrd, SNP boot shim, ``igvmfilegen``, guest manifest,
@@ -131,12 +150,12 @@ output or your own compatible IGVM. Run as root on L1,
 choosing a new name for every launch. Set ``IGVM`` to your image::
 
     export IGVM="$HOME/images/enclave.igvm"
-    sudo env AZURE_CONFIG_DIR=/root/.azure-ace \
+    sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" ace launch --name demo-1 \
+        "$ENCLAVE_VENV/bin/az" enclave launch --name demo-1 \
         --igvm "$IGVM" --openvmm /usr/bin/openvmm
 
-Currently, only one ACE-managed enclave may be active on an L1, even with
+Currently, only one Enclave-managed enclave may be active on an L1, even with
 different names or ``--state-dir`` values. A second launch fails until the
 existing runtime stops. OpenVMM starts on demand, not during setup.
 
@@ -148,9 +167,9 @@ Destroy
 Stop the VM and OpenVMM and clean up owned sockets, retaining the input IGVM,
 logs, and evidence. Run on the same L1 host::
 
-    sudo env AZURE_CONFIG_DIR=/root/.azure-ace \
+    sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ACE_VENV/bin/az" ace destroy --name demo-1
+        "$ENCLAVE_VENV/bin/az" enclave destroy --name demo-1
 
 The default timeout is 30 seconds; change it with ``--timeout``. Cleanup has
 additional bounded grace periods. Failed destruction is not confirmation
@@ -168,8 +187,8 @@ Processes and connections
 The launching CLI starts a detached Python supervisor, which starts OpenVMM
 as its child. Both outlive the CLI command::
 
-    az ace launch / destroy -- gRPC via rpc.sock --> OpenVMM
-    az ace launch ---------- CONNECT via vsock.sock --> guest app, port 4050
+    az enclave launch / destroy -- gRPC via rpc.sock --> OpenVMM
+    az enclave launch ---------- CONNECT via vsock.sock --> guest app, port 4050
     supervisor <------------ COM1 via serial.sock ---- OpenVMM
         |
         +-- owns and reaps the OpenVMM child
@@ -186,7 +205,7 @@ These are three separate local Unix-socket connections:
   OpenVMM stdout/stderr to ``openvmm.log``. Its own output goes to
   ``supervisor.log``.
 
-A host-wide lock permits only one ACE-managed runtime. Its descriptor is
+A host-wide lock permits only one Enclave-managed runtime. Its descriptor is
 inherited by the supervisor and OpenVMM, so the lock remains held while
 either process survives the CLI. A separate per-instance lock prevents
 concurrent commands from managing the same instance.
@@ -194,36 +213,36 @@ concurrent commands from managing the same instance.
 User and root CLI configuration
 -------------------------------
 
-ACE currently requires root for setup, launch, and destroy: setup
+Enclave currently requires root for setup, launch, and destroy: setup
 can install system packages, while launch/destroy manage the host's VM
 runtime, access ``/dev/mshv``, and use root-owned instance state. Developer
 bootstrap, image creation, and ordinary help commands do not need sudo.
 All commands use the same virtual environment and extension installation,
 but keep their Azure CLI session files and command logs separate:
 
-* Normal-user commands use ``AZURE_CONFIG_DIR`` from ``activate-ace.sh``.
-* Sudo commands use ``AZURE_CONFIG_DIR=/root/.azure-ace``,
+* Normal-user commands use ``AZURE_CONFIG_DIR`` from ``activate-enclave.sh``.
+* Sudo commands use ``AZURE_CONFIG_DIR=/root/.azure-enclave``,
   while preserving ``AZURE_EXTENSION_DIR`` to find the installed extension.
 
 Do not export the root configuration path into your normal shell or run
 create with sudo. If earlier sudo commands used your user configuration,
 restore ownership of that dedicated directory once::
 
-    sudo chown -R -- "$(id -u):$(id -g)" "$ACE_VENV/azure-config"
+    sudo chown -R -- "$(id -u):$(id -g)" "$ENCLAVE_VENV/azure-config"
 
 View launch evidence
 --------------------
 
 After successful guest readiness, launch saves the JSON response under the
-instance directory. ACE requires root-owned state directories with mode
+instance directory. Enclave requires root-owned state directories with mode
 ``0700``, including custom ``--state-dir`` locations. Your normal user cannot
 enter these directories; use sudo to read the evidence directly without
 changing directories::
 
-    sudo "$ACE_VENV/bin/python" -m json.tool \
+    sudo "$ENCLAVE_VENV/bin/python" -m json.tool \
         /var/lib/ace/instances/demo-1/response.json
 
-``evidence.report`` is the hex-encoded 1184-byte SNP report. ACE checks the
+``evidence.report`` is the hex-encoded 1184-byte SNP report. Enclave checks the
 report's shape, **not** its signature, measurement, challenge binding, or
 certificate chain. Successful launch is not verified attestation and
 performs no key release.
@@ -241,30 +260,30 @@ been removed. Choose a destination that does not already exist::
     cd "$HOME/demo-1-results"
     python -m json.tool response.json
 
-Keep the original ACE directory root-owned and private; do not change its
+Keep the original Enclave directory root-owned and private; do not change its
 permissions to gain access. The user-owned copy is a results archive, not a
-relocatable or resumable ACE instance.
+relocatable or resumable Enclave instance.
 
 Testing using a wheel (.whl)
 ---------------------------
 
-Install a trusted ACE wheel to use or test a packaged version of the
+Install a trusted Enclave wheel to use or test a packaged version of the
 extension. The target host does not need a development venv, azdev or a
 source checkout. This tests the packaged artifact rather than editable
-source; it does not change ACE's prototype status or attestation limitations.
+source; it does not change Enclave's prototype status or attestation limitations.
 
 Build the wheel on the development machine using the venv/azdev setup above::
 
-    azdev extension build ace
+    azdev extension build enclave
 
 Copy the resulting ``.whl`` to the target host.
 
 To test the wheel on the same machine as the development venv, first stop
-any ACE-managed instance. Open a separate shell without sourcing the
+any Enclave-managed instance. Open a separate shell without sourcing the
 development activation script (or run ``deactivate`` and
 ``unset AZURE_CONFIG_DIR AZURE_EXTENSION_DIR``), then use the standard
-system-installed ``az``, not ``$ACE_VENV/bin/az``.
-Return to editable development by sourcing the venv's ``activate-ace.sh``
+system-installed ``az``, not ``$ENCLAVE_VENV/bin/az``.
+Return to editable development by sourcing the venv's ``activate-enclave.sh``
 again after stopping the wheel-tested instance.
 
 If Azure CLI is not installed outside the development venv, install it
@@ -288,20 +307,20 @@ Verify that both invocations select the intended standard CLI installation::
 Install the wheel separately for your normal user and root, adjusting the
 filename to match the artifact you copied::
 
-    export ACE_WHEEL="$HOME/dist/ace-0.1.0-py3-none-any.whl"
-    az extension add --source "$ACE_WHEEL"
-    sudo az extension add --source "$ACE_WHEEL"
-    az ace --help
-    sudo az ace --help
+    export ENCLAVE_WHEEL="$HOME/dist/enclave-0.1.0-py3-none-any.whl"
+    az extension add --source "$ENCLAVE_WHEEL"
+    sudo az extension add --source "$ENCLAVE_WHEEL"
+    az enclave --help
+    sudo az enclave --help
 
 The normal-user installation supports image creation; root's installation
-supports setup, launch and destroy. If ACE is already installed, stop any
+supports setup, launch and destroy. If Enclave is already installed, stop any
 managed instances before replacing it and use ``--upgrade`` with the
 extension installation commands.
 
 Prepare OpenVMM::
 
-    sudo az ace setup
+    sudo az enclave setup
 
 Approve installation if prompted. Setup verifies the supported OpenVMM
 package; it does not install a compatible kernel or reboot.
@@ -309,11 +328,11 @@ package; it does not install a compatible kernel or reboot.
 Create an image as your normal user, or skip this step if you copied a
 prepared image::
 
-    az ace create \
-        --workspace "$HOME/ace-build" \
-        --output-file "$HOME/ace-artifacts/enclave.igvm"
+    az enclave create \
+        --workspace "$HOME/enclave-build" \
+        --output-file "$HOME/enclave-artifacts/enclave.igvm"
 
 Launch the image, then destroy the instance when finished::
 
-    sudo az ace launch --name test-1 --igvm "$HOME/ace-artifacts/enclave.igvm"
-    sudo az ace destroy --name test-1
+    sudo az enclave launch --name test-1 --igvm "$HOME/enclave-artifacts/enclave.igvm"
+    sudo az enclave destroy --name test-1

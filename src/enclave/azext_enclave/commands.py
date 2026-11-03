@@ -4,8 +4,8 @@
 # --------------------------------------------------------------------------------------------
 
 def load_command_table(self, _):
-    with self.command_group('ace') as g:
-        g.custom_command('setup', 'setup_ace')
-        g.custom_command('create', 'create_ace')
-        g.custom_command('launch', 'launch_ace')
-        g.custom_command('destroy', 'destroy_ace')
+    with self.command_group('enclave') as g:
+        g.custom_command('setup', 'setup_enclave')
+        g.custom_command('create', 'create_enclave')
+        g.custom_command('launch', 'launch_enclave')
+        g.custom_command('destroy', 'destroy_enclave')

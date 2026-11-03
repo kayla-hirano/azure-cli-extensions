@@ -20,6 +20,7 @@ from typing import Dict, Iterator, Optional
 
 from knack.util import CLIError
 
+# Retain legacy paths so old and new installations share state and the host guard.
 DEFAULT_STATE_DIR = '/var/lib/ace/instances'
 HOST_STATE_DIR = '/run/ace'
 
@@ -27,9 +28,9 @@ HOST_STATE_DIR = '/run/ace'
 def require_host(timeout: float) -> None:
     """Require the local Linux/root execution environment and a valid timeout."""
     if sys.platform != 'linux':
-        raise CLIError('ACE launch/destroy must run locally on Linux L1.')
+        raise CLIError('Enclave launch/destroy must run locally on Linux L1.')
     if os.geteuid() != 0:
-        raise CLIError('Run ACE launch/destroy as root on L1.')
+        raise CLIError('Run Enclave launch/destroy as root on L1.')
     if not math.isfinite(timeout) or timeout <= 0:
         raise CLIError('--timeout must be a finite positive number of seconds.')
 
@@ -57,11 +58,11 @@ def check_private(path: Path) -> None:
     """Reject directories with the wrong owner, type, or group/other permissions."""
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-        raise CLIError('ACE state directory must be owned by the caller with mode 0700: {}'.format(path))
+        raise CLIError('Enclave state directory must be owned by the caller with mode 0700: {}'.format(path))
 
 
 @contextmanager
-def instance_lock(directory: Path, busy_error: str = 'Another command is managing this ACE instance.'
+def instance_lock(directory: Path, busy_error: str = 'Another command is managing this Enclave instance.'
                   ) -> Iterator[int]:
     """Hold a nonblocking flock, exposing its descriptor for explicit child inheritance."""
     import fcntl
@@ -70,7 +71,7 @@ def instance_lock(directory: Path, busy_error: str = 'Another command is managin
     try:
         info = os.fstat(descriptor)
         if info.st_uid != os.geteuid() or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-            raise CLIError('Unsafe ACE instance lock: {}'.format(lock_path))
+            raise CLIError('Unsafe Enclave instance lock: {}'.format(lock_path))
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -82,10 +83,10 @@ def instance_lock(directory: Path, busy_error: str = 'Another command is managin
 
 @contextmanager
 def host_lock() -> Iterator[int]:
-    """Reserve the single ACE runtime slot independently of instance names and state roots."""
+    """Reserve the single Enclave runtime slot independently of instance names and state roots."""
     directory = instance_path(HOST_STATE_DIR, 'enclave')
     with instance_lock(
-            directory, 'An ACE enclave is already starting or running on this L1. '
+            directory, 'An enclave is already starting or running on this L1. '
             'Destroy the existing instance before launching another.') as descriptor:
         # Only close our descriptor on exit: inherited copies keep the flock held until all owners exit.
         yield descriptor
@@ -107,7 +108,7 @@ def read_record(path: Path) -> dict:
     with path.open(encoding='utf-8') as stream:
         value = json.load(stream)
     if not isinstance(value, dict):
-        raise CLIError('Invalid ACE record: {}'.format(path))
+        raise CLIError('Invalid Enclave record: {}'.format(path))
     return value
 
 

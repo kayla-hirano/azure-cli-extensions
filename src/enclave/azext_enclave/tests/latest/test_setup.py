@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 from knack.util import CLIError
 
-from azext_ace import _setup
-from azext_ace._runtime import RUNTIME_PACKAGE, RUNTIME_PATH
+from azext_enclave import _setup
+from azext_enclave._runtime import RUNTIME_PACKAGE, RUNTIME_PATH
 
 
 class HostSetupTest(unittest.TestCase):
@@ -37,7 +37,7 @@ class HostSetupTest(unittest.TestCase):
             kwargs = {'new': value} if target == 'sys.platform' else {'return_value': value}
             if target == 'os.geteuid':
                 kwargs['create'] = True
-            patcher = patch('azext_ace._setup.' + target, **kwargs)
+            patcher = patch('azext_enclave._setup.' + target, **kwargs)
             self.mocks[target] = patcher.start()
             self.addCleanup(patcher.stop)
         self.mocks['Path.exists'].side_effect = [True, False]
@@ -78,7 +78,7 @@ class HostSetupTest(unittest.TestCase):
         self.mocks['subprocess.run'].assert_not_called()
 
     def test_refuses_non_linux_or_non_root_hosts(self) -> None:
-        with patch('azext_ace._setup.sys.platform', 'win32'):
+        with patch('azext_enclave._setup.sys.platform', 'win32'):
             with self.assertRaisesRegex(CLIError, 'Azure Linux 3 L1'):
                 _setup.setup_host()
         self.mocks['os.geteuid'].return_value = 1000

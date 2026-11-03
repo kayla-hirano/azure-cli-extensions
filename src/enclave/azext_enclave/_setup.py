@@ -25,19 +25,19 @@ logger = get_logger(__name__)
 def setup_host(yes: bool = False) -> dict:
     """Check the host before offering a bounded, version-specific package installation."""
     if sys.platform != 'linux':
-        raise CLIError('ACE setup must run locally on Azure Linux 3 L1.')
+        raise CLIError('Enclave setup must run locally on Azure Linux 3 L1.')
     if os.geteuid() != 0:
-        raise CLIError('Run ACE setup as root on L1.')
+        raise CLIError('Run Enclave setup as root on L1.')
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
                    if line.startswith(('ID=', 'VERSION_ID=')))
     if release.get('ID', '').strip('"\'') != 'azurelinux' \
             or release.get('VERSION_ID', '').strip('"\'') != '3.0':
-        raise CLIError('Automatic ACE setup supports Azure Linux 3.0 only; no system changes were made.')
+        raise CLIError('Automatic Enclave setup supports Azure Linux 3.0 only; no system changes were made.')
     device = Path('/dev/mshv')
     if not device.exists() or not stat.S_ISCHR(device.stat().st_mode):
         raise CLIError(
             'A compatible L1 kernel exposing the /dev/mshv character device is required. '
-            'Provision the kernel separately; ACE setup does not change kernels or reboot.')
+            'Provision the kernel separately; Enclave setup does not change kernels or reboot.')
     if not shutil.which('rpm'):
         raise CLIError('RPM is required to verify OpenVMM. Use an Azure Linux host with rpm installed.')
     if not Path(RUNTIME_PATH).exists():
@@ -46,7 +46,7 @@ def setup_host(yes: bool = False) -> dict:
             raise CLIError('tdnf is required to install OpenVMM. No packages were installed.')
         user_confirmation(
             'Install {} and its dependencies from the configured Azure Linux repositories? '
-            'ACE will not add repositories, change kernels, or reboot.'.format(RUNTIME_PACKAGE), yes)
+            'Enclave will not add repositories, change kernels, or reboot.'.format(RUNTIME_PACKAGE), yes)
         logger.warning('Installing %s; do not interrupt the package transaction.', RUNTIME_PACKAGE)
         try:
             result = subprocess.run(

@@ -23,9 +23,9 @@ import grpc
 from google.protobuf.empty_pb2 import Empty
 from knack.util import CLIError
 
-from azext_ace import _instance, _lifecycle, _rpc, _runtime
-from azext_ace import _worker
-from azext_ace.rpc import vmservice_pb2 as vm
+from azext_enclave import _instance, _lifecycle, _rpc, _runtime
+from azext_enclave import _worker
+from azext_enclave.rpc import vmservice_pb2 as vm
 
 
 class RpcContractTest(unittest.TestCase):
@@ -61,7 +61,7 @@ class RpcContractTest(unittest.TestCase):
     def test_unix_channel_uses_valid_http2_authority(self) -> None:
         """Keep the socket path out of the authority header rejected by OpenVMM's HTTP/2 server."""
         path = Path('/var/lib/ace/instances/demo/rpc.sock')
-        with patch('azext_ace._rpc.grpc.insecure_channel') as channel:
+        with patch('azext_enclave._rpc.grpc.insecure_channel') as channel:
             with _rpc.VmClient(path, time.monotonic() + 5):
                 channel.assert_called_once_with(
                     'unix:' + str(path),
@@ -96,7 +96,7 @@ class RpcContractTest(unittest.TestCase):
         server.start()
         channel = grpc.insecure_channel('127.0.0.1:{}'.format(port))
         try:
-            with patch('azext_ace._rpc.grpc.insecure_channel', return_value=channel):
+            with patch('azext_enclave._rpc.grpc.insecure_channel', return_value=channel):
                 with _rpc.VmClient(Path('unused'), time.monotonic() + 5) as client:
                     client.ready()
                     client.call('CreateVM', _rpc.create_request(Path('enclave'), Path('instance'), 'demo'))
@@ -117,7 +117,7 @@ class RpcContractTest(unittest.TestCase):
         with _rpc.VmClient(Path('unused'), time.monotonic() - 1) as client:
             with self.assertRaisesRegex(CLIError, 'timed out'):
                 client.call('Quit')
-        with patch('azext_ace._rpc.grpc.channel_ready_future') as ready:
+        with patch('azext_enclave._rpc.grpc.channel_ready_future') as ready:
             ready.return_value.result.side_effect = grpc.FutureTimeoutError()
             with _rpc.VmClient(Path('unused'), time.monotonic() + 1) as client:
                 with self.assertRaisesRegex(CLIError, 'did not become ready'):
@@ -131,7 +131,7 @@ class LinuxFilesystemTest(unittest.TestCase):
         """Provide missing Linux constants when mocked filesystem/socket tests run on Windows."""
         if sys.platform != 'linux':
             # Unit tests can exercise records on Windows without weakening Linux production flags.
-            patcher = patch('azext_ace._instance.os.O_NOFOLLOW', 0, create=True)
+            patcher = patch('azext_enclave._instance.os.O_NOFOLLOW', 0, create=True)
             patcher.start()
             self.addCleanup(patcher.stop)
             patcher = patch('socket.AF_UNIX', 1, create=True)
@@ -163,7 +163,7 @@ class InstanceTest(LinuxFilesystemTest):
             self.assertEqual(connection.settimeout.call_count, 2)
 
     def test_line_size_limit_includes_newline(self) -> None:
-        with patch('azext_ace._lifecycle.MAX_LINE_BYTES', 16):
+        with patch('azext_enclave._lifecycle.MAX_LINE_BYTES', 16):
             for size in (15, 16, 17):
                 with self.subTest(size=size), io.BufferedReader(
                         io.BytesIO(b'x' * (size - 1) + b'\n'), buffer_size=8) as stream:
@@ -178,7 +178,7 @@ class InstanceTest(LinuxFilesystemTest):
         stream.peek.side_effect = [b'O', b'K\n']
         stream.read.return_value = b'O'
         connection = MagicMock()
-        with patch('azext_ace._lifecycle.time.monotonic', side_effect=[0, 2]):
+        with patch('azext_enclave._lifecycle.time.monotonic', side_effect=[0, 2]):
             with self.assertRaisesRegex(CLIError, 'timed out'):
                 _lifecycle.read_line(stream, connection, 1)
         stream.peek.assert_called_once_with(1)
@@ -193,11 +193,11 @@ class InstanceTest(LinuxFilesystemTest):
 
     def test_host_validation(self):
         """Reject unsupported hosts and invalid timeout values before lifecycle work starts."""
-        with patch('azext_ace._instance.sys.platform', 'win32'):
+        with patch('azext_enclave._instance.sys.platform', 'win32'):
             with self.assertRaisesRegex(CLIError, 'Linux L1'):
                 _instance.require_host(10)
-        with patch('azext_ace._instance.sys.platform', 'linux'), \
-                patch('azext_ace._instance.os.geteuid', return_value=0, create=True):
+        with patch('azext_enclave._instance.sys.platform', 'linux'), \
+                patch('azext_enclave._instance.os.geteuid', return_value=0, create=True):
             for value in (0, -1, float('inf'), float('nan')):
                 with self.subTest(value=value), self.assertRaisesRegex(CLIError, '--timeout'):
                     _instance.require_host(value)
@@ -205,8 +205,8 @@ class InstanceTest(LinuxFilesystemTest):
     def test_pid_reuse_is_not_signaled(self):
         """Ensure cleanup does not signal a different process that reused a recorded PID."""
         record = {'pid': 321, 'start': '100'}
-        with patch('azext_ace._instance.identity', return_value={'pid': 321, 'start': '101'}), \
-                patch('azext_ace._instance.os.kill') as kill:
+        with patch('azext_enclave._instance.identity', return_value={'pid': 321, 'start': '101'}), \
+                patch('azext_enclave._instance.os.kill') as kill:
             _instance.stop_owned(record)
             kill.assert_not_called()
 
@@ -230,22 +230,22 @@ class InstanceTest(LinuxFilesystemTest):
 
     def test_runtime_requires_known_package_or_explicit_opt_in(self):
         """Require expected package provenance unless the caller knowingly permits a custom runtime."""
-        with patch('azext_ace._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
-                patch('azext_ace._runtime.subprocess.run',
+        with patch('azext_enclave._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
+                patch('azext_enclave._runtime.subprocess.run',
                       return_value=SimpleNamespace(returncode=0, stdout='0.2.0-2.azl3')):
             self.assertEqual(_runtime.resolve_runtime('openvmm', False).name, 'openvmm')
-        with patch('azext_ace._runtime.shutil.which', side_effect=['/custom/openvmm', None]):
+        with patch('azext_enclave._runtime.shutil.which', side_effect=['/custom/openvmm', None]):
             with self.assertRaisesRegex(CLIError, 'low-ECAM'):
                 _runtime.resolve_runtime('openvmm', False)
-        with patch('azext_ace._runtime.shutil.which', side_effect=['/custom/openvmm', None]), \
-                patch('azext_ace._runtime.logger.warning') as warning:
+        with patch('azext_enclave._runtime.shutil.which', side_effect=['/custom/openvmm', None]), \
+                patch('azext_enclave._runtime.logger.warning') as warning:
             _runtime.resolve_runtime('openvmm', True)
             warning.assert_called_once()
 
     def test_modified_package_requires_explicit_opt_in(self):
         """Treat failed RPM integrity verification as an unrecognized runtime."""
-        with patch('azext_ace._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
-                patch('azext_ace._runtime.subprocess.run', side_effect=[
+        with patch('azext_enclave._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
+                patch('azext_enclave._runtime.subprocess.run', side_effect=[
                     SimpleNamespace(returncode=0, stdout='0.2.0-2.azl3'),
                     SimpleNamespace(returncode=1, stdout='modified executable')]):
             with self.assertRaisesRegex(CLIError, 'unrecognized runtime'):
@@ -254,8 +254,8 @@ class InstanceTest(LinuxFilesystemTest):
     def test_package_verification_timeout_is_actionable(self):
         """Translate a stalled RPM check into a clear CLI error."""
         import subprocess
-        with patch('azext_ace._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
-                patch('azext_ace._runtime.subprocess.run',
+        with patch('azext_enclave._runtime.shutil.which', side_effect=['/usr/bin/openvmm', '/usr/bin/rpm']), \
+                patch('azext_enclave._runtime.subprocess.run',
                       side_effect=subprocess.TimeoutExpired('rpm', 10)):
             with self.assertRaisesRegex(CLIError, 'Timed out verifying'):
                 _runtime.resolve_runtime('openvmm', False)
@@ -310,8 +310,8 @@ class GuestProbeTest(LinuxFilesystemTest):
             directory = Path(temporary)
             _instance.write_record(directory / 'runtime.json', {'openvmm': {}, 'supervisor': {}})
             exchange = executor.submit(serve)
-            with patch('azext_ace._lifecycle.alive', return_value=True), \
-                    patch('azext_ace._lifecycle.socket.socket', return_value=connection):
+            with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                    patch('azext_enclave._lifecycle.socket.socket', return_value=connection):
                 _lifecycle.probe_guest(directory, time.monotonic() + 5)
             self.assertEqual(exchange.result(timeout=3)['payload'], 'hello world')
             self.assertEqual((directory / 'response.json').read_bytes(), response)
@@ -330,10 +330,10 @@ class GuestProbeTest(LinuxFilesystemTest):
                     stream.peek.side_effect = incoming.peek
                     stream.read.side_effect = incoming.read
                     streams.append(stream)
-                with patch('azext_ace._lifecycle.alive', return_value=True), \
-                        patch('azext_ace._lifecycle.socket.socket') as factory, \
-                        patch('azext_ace._lifecycle.time.sleep') as sleep, \
-                        patch('azext_ace._lifecycle.logger.debug') as debug:
+                with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                        patch('azext_enclave._lifecycle.socket.socket') as factory, \
+                        patch('azext_enclave._lifecycle.time.sleep') as sleep, \
+                        patch('azext_enclave._lifecycle.logger.debug') as debug:
                     connection = factory.return_value.__enter__.return_value
                     connection.makefile.return_value.__enter__.side_effect = streams
                     _lifecycle.probe_guest(directory, time.monotonic() + 5)
@@ -353,10 +353,10 @@ class GuestProbeTest(LinuxFilesystemTest):
                 """Advance the test clock instead of waiting for another boot-time retry."""
                 clock[0] += seconds
 
-            with patch('azext_ace._lifecycle.alive', return_value=True), \
-                    patch('azext_ace._lifecycle.socket.socket') as factory, \
-                    patch('azext_ace._lifecycle.time.monotonic', side_effect=lambda: clock[0]), \
-                    patch('azext_ace._lifecycle.time.sleep', side_effect=advance):
+            with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                    patch('azext_enclave._lifecycle.socket.socket') as factory, \
+                    patch('azext_enclave._lifecycle.time.monotonic', side_effect=lambda: clock[0]), \
+                    patch('azext_enclave._lifecycle.time.sleep', side_effect=advance):
                 connection = factory.return_value.__enter__.return_value
                 stream = connection.makefile.return_value.__enter__.return_value
                 stream.peek.return_value = b''
@@ -385,8 +385,8 @@ class GuestProbeTest(LinuxFilesystemTest):
                 incoming = io.BufferedReader(io.BytesIO(b'OK 4050\n' + response))
                 stream.peek.side_effect = incoming.peek
                 stream.read.side_effect = incoming.read
-                with patch('azext_ace._lifecycle.alive', return_value=True), \
-                        patch('azext_ace._lifecycle.socket.socket') as factory:
+                with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                        patch('azext_enclave._lifecycle.socket.socket') as factory:
                     connection = factory.return_value.__enter__.return_value
                     connection.makefile.return_value.__enter__.return_value = stream
                     if evidence == {'tee': 'snp', 'report': '00' * 1184}:
@@ -407,7 +407,7 @@ class GuestProbeTest(LinuxFilesystemTest):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             _instance.write_record(directory / 'runtime.json', {'openvmm': {}, 'supervisor': {}})
-            with patch('azext_ace._lifecycle.alive', return_value=False):
+            with patch('azext_enclave._lifecycle.alive', return_value=False):
                 with self.assertRaisesRegex(CLIError, 'exited'):
                     _lifecycle.probe_guest(directory, time.monotonic() + 1)
 
@@ -420,12 +420,12 @@ class WorkerTest(LinuxFilesystemTest):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             _instance.write_record(directory / 'instance.json', {'openvmm': '/usr/bin/openvmm'})
-            with patch('azext_ace._worker.socket.socket') as sockets, \
-                    patch('azext_ace._worker.selectors.DefaultSelector') as selectors, \
-                    patch('azext_ace._worker.subprocess.Popen') as popen, \
-                    patch('azext_ace._worker.identity', return_value={'pid': 123}), \
-                    patch('azext_ace._worker.time.monotonic', side_effect=[0, 2]), \
-                    patch('azext_ace._worker.signal.signal'):
+            with patch('azext_enclave._worker.socket.socket') as sockets, \
+                    patch('azext_enclave._worker.selectors.DefaultSelector') as selectors, \
+                    patch('azext_enclave._worker.subprocess.Popen') as popen, \
+                    patch('azext_enclave._worker.identity', return_value={'pid': 123}), \
+                    patch('azext_enclave._worker.time.monotonic', side_effect=[0, 2]), \
+                    patch('azext_enclave._worker.signal.signal'):
                 listener = sockets.return_value.__enter__.return_value
                 connection = MagicMock()
                 listener.accept.return_value = (connection, None)
@@ -471,10 +471,10 @@ class LifecycleTest(LinuxFilesystemTest):
             'resolve_runtime': self.executable,
         }
         for name, result in patches.items():
-            patcher = patch('azext_ace._lifecycle.' + name, return_value=result)
+            patcher = patch('azext_enclave._lifecycle.' + name, return_value=result)
             patcher.start()
             self.addCleanup(patcher.stop)
-        patcher = patch('azext_ace._lifecycle.VmClient')
+        patcher = patch('azext_enclave._lifecycle.VmClient')
         self.client = patcher.start().return_value.__enter__.return_value
         self.addCleanup(patcher.stop)
 
@@ -493,8 +493,8 @@ class LifecycleTest(LinuxFilesystemTest):
         self.directory.mkdir()
         state = {'status': 'starting'}
         with patch.dict(os.environ, {'PYTHONPATH': 'existing-source'}), \
-                patch('azext_ace._lifecycle.subprocess.Popen') as popen, \
-                patch('azext_ace._lifecycle.identity', return_value={'pid': 123}):
+                patch('azext_enclave._lifecycle.subprocess.Popen') as popen, \
+                patch('azext_enclave._lifecycle.identity', return_value={'pid': 123}):
             _lifecycle._start_supervisor(self.directory, state, 47)
         options = popen.call_args.kwargs
         self.assertTrue(options['start_new_session'])
@@ -512,8 +512,8 @@ class LifecycleTest(LinuxFilesystemTest):
     def test_supervisor_early_exit_is_reported(self) -> None:
         """Reap an exited worker without publishing a successful supervisor record."""
         self.directory.mkdir()
-        with patch('azext_ace._lifecycle.subprocess.Popen') as popen, \
-                patch('azext_ace._lifecycle.identity', return_value=None):
+        with patch('azext_enclave._lifecycle.subprocess.Popen') as popen, \
+                patch('azext_enclave._lifecycle.identity', return_value=None):
             with self.assertRaisesRegex(CLIError, 'Supervisor failed to start'):
                 _lifecycle._start_supervisor(self.directory, {}, 47)
         popen.return_value.wait.assert_called_once_with(timeout=5)
@@ -524,10 +524,10 @@ class LifecycleTest(LinuxFilesystemTest):
         self.directory.mkdir()
         state = {'status': 'paused', 'supervisor': {'pid': 123}}
         self.client.call.side_effect = CLIError('Quit rejected')
-        with patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                patch('azext_ace._lifecycle._stop_runtime', side_effect=CLIError('still alive')) as stop, \
-                patch('azext_ace._lifecycle.logger.warning') as warning, \
-                patch('azext_ace._lifecycle.logger.error') as log_error:
+        with patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_enclave._lifecycle._stop_runtime', side_effect=CLIError('still alive')) as stop, \
+                patch('azext_enclave._lifecycle.logger.warning') as warning, \
+                patch('azext_enclave._lifecycle.logger.error') as log_error:
             _lifecycle._rollback_launch(self.directory, state, CLIError('resume rejected'))
         self.client.call.assert_called_once_with('Quit')
         stop.assert_called_once_with(self.directory, state)
@@ -544,17 +544,17 @@ class LifecycleTest(LinuxFilesystemTest):
         device.st_mode = 0o020600
         original_exists = Path.exists
         original_stat = Path.stat
-        with patch('azext_ace._lifecycle.stat.S_ISCHR', return_value=True), \
-                patch('azext_ace._lifecycle.Path.exists', autospec=True,
+        with patch('azext_enclave._lifecycle.stat.S_ISCHR', return_value=True), \
+                patch('azext_enclave._lifecycle.Path.exists', autospec=True,
                       side_effect=lambda path: True if str(path) == str(Path('/dev/mshv'))
                       else original_exists(path)), \
-                patch('azext_ace._lifecycle.Path.stat', autospec=True,
+                patch('azext_enclave._lifecycle.Path.stat', autospec=True,
                       side_effect=lambda path, **kw: device if str(path) == str(Path('/dev/mshv'))
                       else original_stat(path, **kw)), \
-                patch('azext_ace._lifecycle.subprocess.Popen') as popen, \
-                patch('azext_ace._lifecycle.identity', return_value={'pid': 123}), \
-                patch('azext_ace._lifecycle._wait_runtime'), \
-                patch('azext_ace._lifecycle.probe_guest') as probe:
+                patch('azext_enclave._lifecycle.subprocess.Popen') as popen, \
+                patch('azext_enclave._lifecycle.identity', return_value={'pid': 123}), \
+                patch('azext_enclave._lifecycle._wait_runtime'), \
+                patch('azext_enclave._lifecycle.probe_guest') as probe:
             result = _lifecycle.launch('demo', str(self.image))
             self.assertEqual(result['status'], 'running')
             self.assertEqual(result['name'], 'demo')
@@ -579,10 +579,10 @@ class LifecycleTest(LinuxFilesystemTest):
         """Release the VM before quitting its server while retaining the reusable IGVM."""
         self.prepare_destroy()
         self.client.call.return_value = vm.PropertiesVMResponse(state=vm.Running)
-        with patch('azext_ace._lifecycle.alive', return_value=True), \
-                patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                patch('azext_ace._lifecycle.host_lock') as host_guard, \
-                patch('azext_ace._lifecycle._stop_runtime') as stop:
+        with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_enclave._lifecycle.host_lock') as host_guard, \
+                patch('azext_enclave._lifecycle._stop_runtime') as stop:
             result = _lifecycle.destroy('demo')
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                              ['PropertiesVM', 'TeardownVM', 'Quit'])
@@ -601,15 +601,15 @@ class LifecycleTest(LinuxFilesystemTest):
         original_exists = Path.exists
         original_stat = Path.stat
         device = SimpleNamespace(st_mode=0o020600)
-        with patch('azext_ace._lifecycle.Path.exists', autospec=True,
+        with patch('azext_enclave._lifecycle.Path.exists', autospec=True,
                    side_effect=lambda path: True if str(path) == str(Path('/dev/mshv'))
                    else original_exists(path)), \
-                patch('azext_ace._lifecycle.Path.stat', autospec=True,
+                patch('azext_enclave._lifecycle.Path.stat', autospec=True,
                       side_effect=lambda path, **kw: device if str(path) == str(Path('/dev/mshv'))
                       else original_stat(path, **kw)), \
-                patch('azext_ace._lifecycle.host_lock',
-                      side_effect=CLIError('An ACE enclave is already starting or running on this L1.')), \
-                patch('azext_ace._lifecycle.subprocess.Popen') as popen:
+                patch('azext_enclave._lifecycle.host_lock',
+                      side_effect=CLIError('An enclave is already starting or running on this L1.')), \
+                patch('azext_enclave._lifecycle.subprocess.Popen') as popen:
             with self.assertRaisesRegex(CLIError, 'already starting or running'):
                 _lifecycle.launch('another-demo', str(self.image), state_dir=str(self.base / 'other-root'))
             popen.assert_not_called()
@@ -619,9 +619,9 @@ class LifecycleTest(LinuxFilesystemTest):
         """Keep failed destruction explicit and retryable instead of claiming cleanup succeeded."""
         self.prepare_destroy()
         self.client.call.side_effect = CLIError('RPC unavailable')
-        with patch('azext_ace._lifecycle.alive', return_value=True), \
-                patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                patch('azext_ace._lifecycle._stop_runtime') as stop:
+        with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_enclave._lifecycle._stop_runtime') as stop:
             with self.assertRaisesRegex(CLIError, 'retained for retry'):
                 _lifecycle.destroy('demo')
             stop.assert_not_called()
@@ -646,11 +646,11 @@ class LifecycleTest(LinuxFilesystemTest):
                 self.client.call.side_effect = [
                     vm.PropertiesVMResponse(state=vm.Running), Empty(), self.quit_error(),
                 ]
-                with patch('azext_ace._lifecycle.alive', side_effect=checks), \
-                        patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                        patch('azext_ace._lifecycle.time.monotonic', return_value=0), \
-                        patch('azext_ace._lifecycle.time.sleep') as sleep, \
-                        patch('azext_ace._lifecycle._stop_runtime') as stop:
+                with patch('azext_enclave._lifecycle.alive', side_effect=checks), \
+                        patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                        patch('azext_enclave._lifecycle.time.monotonic', return_value=0), \
+                        patch('azext_enclave._lifecycle.time.sleep') as sleep, \
+                        patch('azext_enclave._lifecycle._stop_runtime') as stop:
                     result = _lifecycle.destroy('demo')
                     self.assertEqual(result['status'], 'destroyed')
                     self.assertNotIn('error', result)
@@ -666,11 +666,11 @@ class LifecycleTest(LinuxFilesystemTest):
         self.client.call.side_effect = [
             vm.PropertiesVMResponse(state=vm.Running), Empty(), self.quit_error(),
         ]
-        with patch('azext_ace._lifecycle.alive', return_value=True), \
-                patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                patch('azext_ace._lifecycle.time.monotonic', side_effect=[0, 0, 1]), \
-                patch('azext_ace._lifecycle.time.sleep') as sleep, \
-                patch('azext_ace._lifecycle._stop_runtime') as stop:
+        with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_enclave._lifecycle.time.monotonic', side_effect=[0, 0, 1]), \
+                patch('azext_enclave._lifecycle.time.sleep') as sleep, \
+                patch('azext_enclave._lifecycle._stop_runtime') as stop:
             with self.assertRaisesRegex(CLIError, 'retained for retry.*UNAVAILABLE'):
                 _lifecycle.destroy('demo', timeout=1)
             stop.assert_not_called()
@@ -687,9 +687,9 @@ class LifecycleTest(LinuxFilesystemTest):
                 self.client.call.side_effect = [
                     vm.PropertiesVMResponse(state=vm.Uninitialized), error,
                 ]
-                with patch('azext_ace._lifecycle.alive', side_effect=[True, True]) as alive, \
-                        patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                        patch('azext_ace._lifecycle._stop_runtime') as stop:
+                with patch('azext_enclave._lifecycle.alive', side_effect=[True, True]) as alive, \
+                        patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                        patch('azext_enclave._lifecycle._stop_runtime') as stop:
                     with self.assertRaisesRegex(CLIError, 'retained for retry'):
                         _lifecycle.destroy('demo')
                     self.assertEqual(alive.call_count, 2)
@@ -703,9 +703,9 @@ class LifecycleTest(LinuxFilesystemTest):
                           [vm.PropertiesVMResponse(state=vm.Running), self.quit_error()]):
             with self.subTest(failed_call=len(responses)):
                 self.client.call.side_effect = responses
-                with patch('azext_ace._lifecycle.alive', side_effect=[True, True]) as alive, \
-                        patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                        patch('azext_ace._lifecycle._stop_runtime') as stop:
+                with patch('azext_enclave._lifecycle.alive', side_effect=[True, True]) as alive, \
+                        patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                        patch('azext_enclave._lifecycle._stop_runtime') as stop:
                     with self.assertRaisesRegex(CLIError, 'retained for retry'):
                         _lifecycle.destroy('demo')
                     self.assertEqual(alive.call_count, 2)
@@ -716,15 +716,15 @@ class LifecycleTest(LinuxFilesystemTest):
     def test_destroy_missing_socket_does_not_claim_success(self):
         """Distinguish an unreachable management endpoint from a stopped owned server."""
         self.prepare_destroy()
-        with patch('azext_ace._lifecycle.alive', return_value=True):
+        with patch('azext_enclave._lifecycle.alive', return_value=True):
             with self.assertRaisesRegex(CLIError, 'destruction is unconfirmed'):
                 _lifecycle.destroy('demo')
 
     def test_repeated_destroy_reconciles_dead_processes(self):
         """Allow repeated cleanup of a recorded instance whose processes have already exited."""
         self.prepare_destroy()
-        with patch('azext_ace._lifecycle.alive', return_value=False), \
-                patch('azext_ace._lifecycle._stop_runtime'):
+        with patch('azext_enclave._lifecycle.alive', return_value=False), \
+                patch('azext_enclave._lifecycle._stop_runtime'):
             first = _lifecycle.destroy('demo')
             second = _lifecycle.destroy('demo')
             self.assertEqual(first, second)
@@ -738,7 +738,7 @@ class LifecycleTest(LinuxFilesystemTest):
         state = self.prepare_destroy()
         state['supervisor'] = {'pid': 999}
         _instance.write_record(self.directory / 'instance.json', state)
-        with patch('azext_ace._lifecycle.alive', return_value=True):
+        with patch('azext_enclave._lifecycle.alive', return_value=True):
             with self.assertRaisesRegex(CLIError, 'ownership is inconsistent'):
                 _lifecycle.destroy('demo')
         self.client.call.assert_not_called()
@@ -747,9 +747,9 @@ class LifecycleTest(LinuxFilesystemTest):
         """Avoid tearing down a nonexistent VM while still exiting its owned server."""
         self.prepare_destroy()
         self.client.call.return_value = vm.PropertiesVMResponse(state=vm.Uninitialized)
-        with patch('azext_ace._lifecycle.alive', return_value=True), \
-                patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                patch('azext_ace._lifecycle._stop_runtime'):
+        with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_enclave._lifecycle._stop_runtime'):
             _lifecycle.destroy('demo')
         self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                          ['PropertiesVM', 'Quit'])
@@ -758,10 +758,10 @@ class LifecycleTest(LinuxFilesystemTest):
         """Use RPC to stop an owned server even if its matching supervisor has died."""
         self.prepare_destroy()
         self.client.call.return_value = vm.PropertiesVMResponse(state=vm.Running)
-        with patch('azext_ace._lifecycle.alive', side_effect=lambda record: record['pid'] == 456), \
-                patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                patch('azext_ace._lifecycle._stop_runtime'), \
-                patch('azext_ace._lifecycle.logger.warning') as warning:
+        with patch('azext_enclave._lifecycle.alive', side_effect=lambda record: record['pid'] == 456), \
+                patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_enclave._lifecycle._stop_runtime'), \
+                patch('azext_enclave._lifecycle.logger.warning') as warning:
             self.assertEqual(_lifecycle.destroy('demo')['status'], 'destroyed')
             warning.assert_called_once()
 
@@ -770,16 +770,16 @@ class LifecycleTest(LinuxFilesystemTest):
         original_exists = Path.exists
         original_stat = Path.stat
         device = SimpleNamespace(st_mode=0o020600)
-        with patch('azext_ace._lifecycle.Path.exists', autospec=True,
+        with patch('azext_enclave._lifecycle.Path.exists', autospec=True,
                    side_effect=lambda path: True if str(path) == str(Path('/dev/mshv'))
                    else original_exists(path)), \
-                patch('azext_ace._lifecycle.Path.stat', autospec=True,
+                patch('azext_enclave._lifecycle.Path.stat', autospec=True,
                       side_effect=lambda path, **kw: device if str(path) == str(Path('/dev/mshv'))
                       else original_stat(path, **kw)), \
-                patch('azext_ace._lifecycle.subprocess.Popen'), \
-                patch('azext_ace._lifecycle.identity', return_value={'pid': 123}), \
-                patch('azext_ace._lifecycle._wait_runtime', side_effect=CLIError('startup timeout')), \
-                patch('azext_ace._lifecycle._stop_runtime') as stop:
+                patch('azext_enclave._lifecycle.subprocess.Popen'), \
+                patch('azext_enclave._lifecycle.identity', return_value={'pid': 123}), \
+                patch('azext_enclave._lifecycle._wait_runtime', side_effect=CLIError('startup timeout')), \
+                patch('azext_enclave._lifecycle._stop_runtime') as stop:
             with self.assertRaisesRegex(CLIError, 'Launch failed.*startup timeout'):
                 _lifecycle.launch('demo', str(self.image))
             stop.assert_called_once()
@@ -801,18 +801,18 @@ class LifecycleTest(LinuxFilesystemTest):
             return Empty()
 
         self.client.call.side_effect = rpc_call
-        with patch('azext_ace._lifecycle.Path.exists', autospec=True,
+        with patch('azext_enclave._lifecycle.Path.exists', autospec=True,
                    side_effect=lambda path: True if str(path) == str(Path('/dev/mshv'))
                    else original_exists(path)), \
-                patch('azext_ace._lifecycle.Path.stat', autospec=True,
+                patch('azext_enclave._lifecycle.Path.stat', autospec=True,
                       side_effect=lambda path, **kw: device if str(path) == str(Path('/dev/mshv'))
                       else original_stat(path, **kw)), \
-                patch('azext_ace._lifecycle.Path.is_socket', return_value=True), \
-                patch('azext_ace._lifecycle.subprocess.Popen'), \
-                patch('azext_ace._lifecycle.identity', return_value={'pid': 123}), \
-                patch('azext_ace._lifecycle._wait_runtime'), \
-                patch('azext_ace._lifecycle._stop_runtime') as stop, \
-                patch('azext_ace._lifecycle.probe_guest') as probe:
+                patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_enclave._lifecycle.subprocess.Popen'), \
+                patch('azext_enclave._lifecycle.identity', return_value={'pid': 123}), \
+                patch('azext_enclave._lifecycle._wait_runtime'), \
+                patch('azext_enclave._lifecycle._stop_runtime') as stop, \
+                patch('azext_enclave._lifecycle.probe_guest') as probe:
             with self.assertRaisesRegex(CLIError, 'Launch failed.*resume rejected'):
                 _lifecycle.launch('demo', str(self.image))
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],

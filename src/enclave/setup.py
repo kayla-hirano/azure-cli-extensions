@@ -6,7 +6,7 @@
 # --------------------------------------------------------------------------------------------
 
 
-"""Package the ACE extension, RPC runtime dependencies, and pinned protocol sources/type stubs."""
+"""Package the Enclave extension, RPC runtime dependencies, and pinned protocol sources/type stubs."""
 
 from codecs import open
 from setuptools import setup, find_packages
@@ -46,20 +46,20 @@ with open('HISTORY.rst', 'r', encoding='utf-8') as f:
     HISTORY = f.read()
 
 setup(
-    name='ace',
+    name='enclave',
     version=VERSION,
-    description='Microsoft Azure Command-Line Tools Ace Extension',
+    description='Microsoft Azure Command-Line Tools Enclave Extension',
     # TODO: Update author and email, if applicable
     author='Microsoft Corporation',
     author_email='azpycli@microsoft.com',
     # TODO: change to your extension source code repo if the code will not be put in azure-cli-extensions repo
-    url='https://github.com/Azure/azure-cli-extensions/tree/master/src/ace',
+    url='https://github.com/Azure/azure-cli-extensions/tree/master/src/enclave',
     long_description=README + '\n\n' + HISTORY,
     license='MIT',
     classifiers=CLASSIFIERS,
     packages=find_packages(),
     install_requires=DEPENDENCIES,
-    package_data={'azext_ace': [
+    package_data={'azext_enclave': [
         'azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi',
         'dependencies/dependencies.tar.gz', 'dependencies/enclave_app',
         'dependencies/initramfs/enclave-init',

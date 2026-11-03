@@ -3,7 +3,7 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-"""Expose ACE command handlers while keeping build and lifecycle logic out of CLI registration."""
+"""Expose Enclave command handlers while keeping build and lifecycle logic out of CLI registration."""
 
 from pathlib import Path
 from typing import Optional
@@ -19,19 +19,19 @@ DEFAULT_DEPENDENCY_BUNDLE = DEPENDENCIES_DIR / 'dependencies.tar.gz'
 DEFAULT_APPLICATION = DEPENDENCIES_DIR / 'enclave_app'
 
 
-def setup_ace(yes: bool = False) -> dict:
+def setup_enclave(yes: bool = False) -> dict:
     """Prepare supported host dependencies without modifying the developer environment."""
     from ._setup import setup_host
     try:
         return setup_host(yes)
     except (OSError, ValueError) as error:
-        raise CLIError('Unable to set up ACE host: {}'.format(error)) from error
+        raise CLIError('Unable to set up Enclave host: {}'.format(error)) from error
 
 
-def create_ace(cmd: AzCliCommand, workspace: str, output_file: str,
-               dependency_bundle: Optional[str] = None, init_script: Optional[str] = None,
-               signing_key: Optional[str] = None,
-               keep_intermediates: bool = False, application: Optional[str] = None) -> dict:
+def create_enclave(cmd: AzCliCommand, workspace: str, output_file: str,
+                   dependency_bundle: Optional[str] = None, init_script: Optional[str] = None,
+                   signing_key: Optional[str] = None,
+                   keep_intermediates: bool = False, application: Optional[str] = None) -> dict:
     """Compose an IGVM from trusted dependencies and a packaged or caller-supplied application."""
     from ._image_builder import IgvmBuildError, build_igvm
     bundle = Path(dependency_bundle).expanduser() if dependency_bundle is not None else DEFAULT_DEPENDENCY_BUNDLE
@@ -53,7 +53,7 @@ def create_ace(cmd: AzCliCommand, workspace: str, output_file: str,
             enable_debug='--debug' in cmd.cli_ctx.data['safe_params'],
             logger=logger)
     except IgvmBuildError as error:
-        detail = 'Unable to create ACE image: {}'.format(error)
+        detail = 'Unable to create Enclave image: {}'.format(error)
         if error.workspace is not None:
             detail += '\nBuild workspace retained at: {}'.format(error.workspace)
         raise CLIError(detail) from error
@@ -69,21 +69,21 @@ def _instance_result(state: dict) -> dict:
     return result
 
 
-def launch_ace(name: str, igvm: str, openvmm: str = 'openvmm',
-               state_dir: str = '/var/lib/ace/instances', timeout: float = 120,
-               allow_untested_runtime: bool = False) -> dict:
+def launch_enclave(name: str, igvm: str, openvmm: str = 'openvmm',
+                   state_dir: str = '/var/lib/ace/instances', timeout: float = 120,
+                   allow_untested_runtime: bool = False) -> dict:
     """Delegate local RPC launch and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import launch
     try:
         return _instance_result(launch(name, igvm, openvmm, state_dir, timeout, allow_untested_runtime))
     except (OSError, ValueError, KeyError) as error:
-        raise CLIError('Unable to launch ACE instance: {}'.format(error)) from error
+        raise CLIError('Unable to launch Enclave instance: {}'.format(error)) from error
 
 
-def destroy_ace(name: str, state_dir: str = '/var/lib/ace/instances', timeout: float = 30) -> dict:
+def destroy_enclave(name: str, state_dir: str = '/var/lib/ace/instances', timeout: float = 30) -> dict:
     """Delegate instance teardown and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import destroy
     try:
         return _instance_result(destroy(name, state_dir, timeout))
     except (OSError, ValueError, KeyError) as error:
-        raise CLIError('Unable to destroy ACE instance: {}'.format(error)) from error
+        raise CLIError('Unable to destroy Enclave instance: {}'.format(error)) from error

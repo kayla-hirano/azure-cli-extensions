@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-BASH = os.environ.get('ACE_TEST_BASH') or (shutil.which('bash') if sys.platform == 'linux' else None)
+BASH = os.environ.get('ENCLAVE_TEST_BASH') or (shutil.which('bash') if sys.platform == 'linux' else None)
 SCRIPT = Path(__file__).resolve().parents[3] / 'scripts' / 'bootstrap-dev.sh'
 
 
@@ -24,7 +24,7 @@ def shell_path(path: Path) -> str:
     return str(path)
 
 
-@unittest.skipUnless(BASH, 'Requires bash; ACE_TEST_BASH can select Git Bash on Windows.')
+@unittest.skipUnless(BASH, 'Requires bash; ENCLAVE_TEST_BASH can select Git Bash on Windows.')
 class BootstrapTest(unittest.TestCase):
     """Verify environment creation, reuse, quoting, and explicit failure paths."""
 
@@ -35,14 +35,14 @@ class BootstrapTest(unittest.TestCase):
         self.tools = self.base / 'tools'
         self.tools.mkdir()
         self.repo = self.base / 'checkout with spaces'
-        (self.repo / 'src' / 'ace').mkdir(parents=True)
-        (self.repo / 'src' / 'ace' / 'setup.py').touch()
+        (self.repo / 'src' / 'enclave').mkdir(parents=True)
+        (self.repo / 'src' / 'enclave' / 'setup.py').touch()
         self.venv = self.base / 'venv with spaces'
         self.log = self.base / 'calls.log'
         self.environment = os.environ.copy()
         self.environment.update({
-            'ACE_REPO': shell_path(self.repo),
-            'ACE_VENV': shell_path(self.venv),
+            'ENCLAVE_REPO': shell_path(self.repo),
+            'ENCLAVE_VENV': shell_path(self.venv),
             'AZURE_CONFIG_DIR': 'do-not-use-normal-config',
             'AZURE_EXTENSION_DIR': 'do-not-use-normal-extensions',
             'FAKE_TOOLS': shell_path(self.tools),
@@ -88,15 +88,15 @@ fi
         calls = self.log.read_text()
         self.assertEqual(calls.splitlines().count('venv'), 1)
         self.assertIn('azdev setup --cli pypi --repo ' + shell_path(self.repo), calls)
-        self.assertIn('azdev extension add ace', calls)
+        self.assertIn('azdev extension add enclave', calls)
         self.assertIn('python -m pip install azdev setuptools wheel', calls)
         self.assertIn('python -m pip install --no-build-isolation --config-settings editable_mode=compat -e ', calls)
-        self.assertIn('python -c import grpc; import google.protobuf; import azext_ace', calls)
+        self.assertIn('python -c import grpc; import google.protobuf; import azext_enclave', calls)
         self.assertTrue((self.venv / 'azure-config').is_dir())
         self.assertTrue((self.venv / 'extensions').is_dir())
         result = subprocess.run(
-            [BASH, '-c', 'source "$ACE_VENV/activate-ace.sh"; '
-             'printf "%s\\n" "$ACE_REPO" "$ACE_VENV" "$AZURE_CONFIG_DIR" "$AZURE_EXTENSION_DIR"'],
+            [BASH, '-c', 'source "$ENCLAVE_VENV/activate-enclave.sh"; '
+             'printf "%s\\n" "$ENCLAVE_REPO" "$ENCLAVE_VENV" "$AZURE_CONFIG_DIR" "$AZURE_EXTENSION_DIR"'],
             env=self.environment, capture_output=True, text=True, timeout=30, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
@@ -119,10 +119,10 @@ fi
         self.assertFalse((self.venv / 'azure-config').exists())
 
     def test_refuses_missing_checkout(self) -> None:
-        (self.repo / 'src' / 'ace' / 'setup.py').unlink()
+        (self.repo / 'src' / 'enclave' / 'setup.py').unlink()
         result = self.run_bootstrap()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('ACE checkout not found', result.stderr)
+        self.assertIn('Enclave checkout not found', result.stderr)
         self.assertFalse(self.venv.exists())
 
     def test_install_failure_does_not_report_ready(self) -> None:
@@ -131,4 +131,4 @@ fi
         self.assertEqual(result.returncode, 13)
         self.assertIn('pip failed', result.stderr)
         self.assertNotIn('environment ready', result.stdout)
-        self.assertFalse((self.venv / 'activate-ace.sh').exists())
+        self.assertFalse((self.venv / 'activate-enclave.sh').exists())

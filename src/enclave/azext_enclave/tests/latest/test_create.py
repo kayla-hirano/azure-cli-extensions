@@ -28,16 +28,16 @@ from azure.cli.core.commands import AzCliCommandInvoker
 from azure.cli.core.parser import AzCliCommandParser
 from knack.util import CLIError
 
-from azext_ace import AceCommandsLoader
-from azext_ace import _image_builder as builder
-from azext_ace import custom
+from azext_enclave import EnclaveCommandsLoader
+from azext_enclave import _image_builder as builder
+from azext_enclave import custom
 
 
-class AceTestCommandsLoader(MainCommandsLoader):
-    """Load only ACE through the normal Azure CLI main-loader argument wiring."""
+class EnclaveTestCommandsLoader(MainCommandsLoader):
+    """Load only Enclave through the normal Azure CLI main-loader argument wiring."""
 
     def load_command_table(self, args: list) -> dict:
-        loader = AceCommandsLoader(cli_ctx=self.cli_ctx)
+        loader = EnclaveCommandsLoader(cli_ctx=self.cli_ctx)
         self.command_table = loader.load_command_table(args)
         self.cmd_to_loader_map = {name: [loader] for name in self.command_table}
         return self.command_table
@@ -54,7 +54,7 @@ class CreateCommandTest(unittest.TestCase):
         image = Path('published.igvm').resolve()
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(image, self.measurements)) as build:
-            result = custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
+            result = custom.create_enclave(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
         self.assertEqual(result, {'igvm': str(image), 'measurements': self.measurements})
         self.assertEqual(json.loads(json.dumps(result)), result)
         build.assert_called_once_with(
@@ -66,8 +66,8 @@ class CreateCommandTest(unittest.TestCase):
     def test_signing_and_retention(self) -> None:
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(Path('signed.igvm'), self.measurements)) as build:
-            custom.create_ace(self.cmd, 'work', 'signed.igvm', dependency_bundle='bundle', init_script='init',
-                              signing_key='private.pem', keep_intermediates=True)
+            custom.create_enclave(self.cmd, 'work', 'signed.igvm', dependency_bundle='bundle', init_script='init',
+                                  signing_key='private.pem', keep_intermediates=True)
         self.assertEqual(build.call_args.kwargs['signing_key'], Path('private.pem'))
         self.assertEqual(build.call_args.kwargs['init_script'], Path('init'))
         self.assertIs(build.call_args.kwargs['debug'], True)
@@ -82,7 +82,7 @@ class CreateCommandTest(unittest.TestCase):
                 (['--debug', '--keep-intermediates'], True, True)):
             with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
                 cli = AzCli(cli_name='az', config_dir=directory, config_env_var_prefix='AZURE',
-                            commands_loader_cls=AceTestCommandsLoader,
+                            commands_loader_cls=EnclaveTestCommandsLoader,
                             invocation_cls=AzCliCommandInvoker, parser_cls=AzCliCommandParser,
                             help_cls=AzCliHelp, logging_cls=AzCliLogging, output_cls=AzOutputProducer)
                 output = io.StringIO()
@@ -93,7 +93,7 @@ class CreateCommandTest(unittest.TestCase):
                         patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                         Path('image.igvm'), self.measurements)) as build:
                     code = cli.invoke(
-                        ['ace', 'create', '--workspace', 'work',
+                        ['enclave', 'create', '--workspace', 'work',
                          '--output-file', 'image.igvm', '--output', 'json'] + bundle_args + flags,
                         out_file=output)
                 self.assertEqual(code, 0, str(cli.result.error))
@@ -111,7 +111,7 @@ class CreateCommandTest(unittest.TestCase):
                 error = builder.IgvmBuildError('tool failed', stage='generate-igvm', workspace=workspace)
                 with patch.object(builder, 'build_igvm', side_effect=error):
                     with self.assertRaises(CLIError) as raised:
-                        custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
+                        custom.create_enclave(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
                 self.assertIn('generate-igvm: tool failed', str(raised.exception))
                 self.assertIs(raised.exception.__cause__, error)
                 self.assertEqual('Build workspace retained at:' in str(raised.exception),
@@ -119,12 +119,12 @@ class CreateCommandTest(unittest.TestCase):
 
     def test_required_inputs_and_nonconflicting_options(self) -> None:
         cli = get_default_cli()
-        cli.invocation = SimpleNamespace(data={'command_string': 'ace create'})
-        loader = AceCommandsLoader(cli_ctx=cli)
+        cli.invocation = SimpleNamespace(data={'command_string': 'enclave create'})
+        loader = EnclaveCommandsLoader(cli_ctx=cli)
         table = loader.load_command_table([])
-        loader.load_arguments('ace create')
-        table['ace create'].load_arguments()
-        arguments = table['ace create'].arguments
+        loader.load_arguments('enclave create')
+        table['enclave create'].load_arguments()
+        arguments = table['enclave create'].arguments
         required = {'workspace', 'output_file'}
         self.assertEqual({name for name, arg in arguments.items()
                           if arg.options.get('required') and name != 'cmd'}, required)
@@ -145,7 +145,7 @@ class CreateCommandTest(unittest.TestCase):
         self.assertIn(b'exec /bin/enclave_app serve-vsock 4050\n', script)
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(Path('image.igvm'), self.measurements)) as build:
-            custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
+            custom.create_enclave(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle')
         self.assertEqual(build.call_args.kwargs['init_script'], default_init)
 
     def test_packaged_bundle_is_selected_when_override_is_omitted(self) -> None:
@@ -155,7 +155,7 @@ class CreateCommandTest(unittest.TestCase):
             with patch.object(custom, 'DEFAULT_DEPENDENCY_BUNDLE', archive), \
                     patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                         Path('image.igvm'), self.measurements)) as build:
-                custom.create_ace(self.cmd, 'work', 'image.igvm')
+                custom.create_enclave(self.cmd, 'work', 'image.igvm')
             self.assertEqual(build.call_args.kwargs['dependency_bundle'], archive)
 
     def test_missing_packaged_bundle_has_actionable_override_instructions(self) -> None:
@@ -164,7 +164,7 @@ class CreateCommandTest(unittest.TestCase):
             with patch.object(custom, 'DEFAULT_DEPENDENCY_BUNDLE', archive), \
                     patch.object(builder, 'build_igvm') as build:
                 with self.assertRaisesRegex(CLIError, 'missing.*--dependency-bundle'):
-                    custom.create_ace(self.cmd, 'work', 'image.igvm')
+                    custom.create_enclave(self.cmd, 'work', 'image.igvm')
             build.assert_not_called()
 
     def test_real_packaged_inputs_and_default_selection(self) -> None:
@@ -177,20 +177,20 @@ class CreateCommandTest(unittest.TestCase):
             self.assertIn('igvmfilegen', dependencies)
         with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                 Path('image.igvm'), self.measurements)) as build:
-            custom.create_ace(self.cmd, 'work', 'image.igvm')
+            custom.create_enclave(self.cmd, 'work', 'image.igvm')
         self.assertEqual(build.call_args.kwargs['dependency_bundle'], custom.DEFAULT_DEPENDENCY_BUNDLE)
         self.assertEqual(build.call_args.kwargs['application'], custom.DEFAULT_APPLICATION)
 
     def test_application_override_through_cli_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cli = AzCli(cli_name='az', config_dir=directory, config_env_var_prefix='AZURE',
-                        commands_loader_cls=AceTestCommandsLoader,
+                        commands_loader_cls=EnclaveTestCommandsLoader,
                         invocation_cls=AzCliCommandInvoker, parser_cls=AzCliCommandParser,
                         help_cls=AzCliHelp, logging_cls=AzCliLogging, output_cls=AzOutputProducer)
             with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                     Path('image.igvm'), self.measurements)) as build:
                 code = cli.invoke(
-                    ['ace', 'create', '--workspace', 'work', '--output-file', 'image.igvm',
+                    ['enclave', 'create', '--workspace', 'work', '--output-file', 'image.igvm',
                      '--application', 'custom-app', '--init-script', 'custom-init'],
                     out_file=io.StringIO())
             self.assertEqual(code, 0, str(cli.result.error))
@@ -201,8 +201,8 @@ class CreateCommandTest(unittest.TestCase):
         with patch.object(custom, 'DEFAULT_APPLICATION', Path('missing-packaged-app')), \
                 patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                     Path('image.igvm'), self.measurements)) as build:
-            custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle',
-                              application='custom-app')
+            custom.create_enclave(self.cmd, 'work', 'image.igvm', dependency_bundle='bundle',
+                                  application='custom-app')
         self.assertEqual(build.call_args.kwargs['application'], Path('custom-app'))
         self.assertEqual(build.call_args.kwargs['init_script'],
                          custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init')
@@ -210,7 +210,7 @@ class CreateCommandTest(unittest.TestCase):
     def test_archive_override_is_forwarded_without_requiring_packaged_bundle(self) -> None:
         with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                 Path('image.igvm'), self.measurements)) as build:
-            custom.create_ace(self.cmd, 'work', 'image.igvm', dependency_bundle='custom.tar.gz')
+            custom.create_enclave(self.cmd, 'work', 'image.igvm', dependency_bundle='custom.tar.gz')
         self.assertEqual(build.call_args.kwargs['dependency_bundle'], Path('custom.tar.gz'))
 
 
@@ -593,8 +593,8 @@ class ImageBuilderTest(unittest.TestCase):
         self.application.write_bytes(b'not an executable')
         for application in (self.application, self.root / 'missing-app'):
             with self.subTest(application=application):
-                with self.assertRaisesRegex(CLIError, 'Unable to create ACE image: validate:'):
-                    custom.create_ace(
+                with self.assertRaisesRegex(CLIError, 'Unable to create Enclave image: validate:'):
+                    custom.create_enclave(
                         cmd, str(self.workspace), str(self.output), dependency_bundle=str(self.bundle),
                         application=str(application), init_script=str(self.init))
                 self.assertFalse(self.output.exists())
@@ -622,8 +622,8 @@ class ImageBuilderTest(unittest.TestCase):
         with patch.object(builder.sys, 'platform', 'win32'):
             with self.assertRaisesRegex(CLIError, 'validate: IGVM packaging requires Linux'):
                 cmd = SimpleNamespace(cli_ctx=SimpleNamespace(data={'safe_params': []}))
-                custom.create_ace(cmd, str(self.workspace), str(self.output),
-                                  dependency_bundle=str(self.bundle), init_script=str(self.init))
+                custom.create_enclave(cmd, str(self.workspace), str(self.output),
+                                      dependency_bundle=str(self.bundle), init_script=str(self.init))
         self.run.assert_not_called()
 
 

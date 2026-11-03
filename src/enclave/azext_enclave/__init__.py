@@ -5,26 +5,26 @@
 
 from azure.cli.core import AzCommandsLoader
 
-from azext_ace._help import helps  # pylint: disable=unused-import
+from azext_enclave._help import helps  # pylint: disable=unused-import
 
 
-class AceCommandsLoader(AzCommandsLoader):
+class EnclaveCommandsLoader(AzCommandsLoader):
 
     def __init__(self, cli_ctx=None):
         from azure.cli.core.commands import CliCommandType
-        ace_custom = CliCommandType(
-            operations_tmpl='azext_ace.custom#{}')
-        super(AceCommandsLoader, self).__init__(cli_ctx=cli_ctx,
-                                                custom_command_type=ace_custom)
+        enclave_custom = CliCommandType(
+            operations_tmpl='azext_enclave.custom#{}')
+        super(EnclaveCommandsLoader, self).__init__(
+            cli_ctx=cli_ctx, custom_command_type=enclave_custom)
 
     def load_command_table(self, args):
-        from azext_ace.commands import load_command_table
+        from azext_enclave.commands import load_command_table
         load_command_table(self, args)
         return self.command_table
 
     def load_arguments(self, command):
-        from azext_ace._params import load_arguments
+        from azext_enclave._params import load_arguments
         load_arguments(self, command)
 
 
-COMMAND_LOADER_CLS = AceCommandsLoader
+COMMAND_LOADER_CLS = EnclaveCommandsLoader

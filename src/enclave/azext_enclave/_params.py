@@ -7,10 +7,10 @@
 
 def load_arguments(self, _):
     """Attach command-specific setup, build, and lifecycle options to the command loader."""
-    with self.argument_context('ace setup') as context:
+    with self.argument_context('enclave setup') as context:
         context.argument('yes', options_list=['--yes', '-y'], action='store_true',
                          help='Approve installation of the supported OpenVMM package without prompting.')
-    with self.argument_context('ace create') as context:
+    with self.argument_context('enclave create') as context:
         context.argument('dependency_bundle', required=False,
                          help='Override the packaged dependency bundle with a trusted measured-pcie-v1 '
                               'tar/tar.gz archive or bundle directory.')
@@ -29,13 +29,13 @@ def load_arguments(self, _):
                          help='Optional unencrypted PEM ECDSA P-384 private key for SNP ID-block signing.')
         context.argument('keep_intermediates', action='store_true',
                          help='Retain the private build workspace and stage logs on success or failure.')
-    for command in ('ace launch', 'ace destroy'):
+    for command in ('enclave launch', 'enclave destroy'):
         with self.argument_context(command) as context:
             context.argument('name', options_list=['--name', '-n'], required=True,
                              help='Local instance name (1-32 letters, digits, underscores or hyphens).')
             context.argument('state_dir', help='Private local instance directory root (mode 0700).')
             context.argument('timeout', type=float, help='Operation timeout in seconds.')
-    with self.argument_context('ace launch') as context:
+    with self.argument_context('enclave launch') as context:
         context.argument('igvm', required=True, help='Existing compatible SNP IGVM file on Linux L1.')
         context.argument('openvmm', help='OpenVMM executable path or command name.')
         context.argument('allow_untested_runtime', action='store_true',
