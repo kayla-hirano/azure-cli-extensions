@@ -1,282 +1,230 @@
 # Enclave extension improvements
 
-**Naming:** The extension is `enclave`, its Python package is `azext_enclave`,
-and its commands use `az enclave`. The default state root is
-`/var/lib/enclave/instances` and the host lock is `/run/enclave/enclave.lock`.
-Stop all old runtimes and retire old installations before upgrading; state is
-not automatically migrated and mixed-version launches are not supported. The separate
-ACC-CVM-Tooling `src/ace` sample directory is unchanged.
+This document tracks proposed improvements to the current extension. The first
+new focus is making existing enclave instances and their logs discoverable
+before users launch another enclave. The appendix remains a reference for the
+current implementation; proposals below are not implemented behavior.
 
-## 1. Objective and scope
+## 1. Proposed change: `az enclave status`
 
-Make Enclave a reusable enclave image-composition tool: accept externally built
-dependency bundles and applications, compose reproducible images, optionally sign
-them, and preserve the existing launch/destroy interface.
+### Purpose
 
-Create will **not** compile dependencies or applications. This increment does
-not add arbitrary workload formats, new attestation guarantees, or a generic
-application-readiness protocol. Supported launch resources/devices will instead
-be derived from the image configuration through an image-bound launch profile.
+Add a read-only command that lists retained enclave instances, including running
+and destroyed instances, and shows where their output logs can be viewed.
+Users should be able to discover names already taken by previous launches and
+identify an active runtime that must be destroyed before another can launch.
 
-## 2. Current design
+Today, launch refuses an existing instance directory even after destroy,
+because its records and logs are retained. Separately, a host-wide guard permits
+only one managed runtime at a time. Status should explain both constraints:
+a destroyed enclave still reserves its name, while a live owned runtime can
+block a launch under a different name.
 
-```text
-Packaged defaults or explicit local bundle + application + init script
-    -> az enclave create -> composed initrd -> IGVM + expected measurements
-    -> az enclave launch -> guest readiness exchange -> az enclave destroy
-```
+### Command and output
 
-| Command | Current responsibility |
-| --- | --- |
-| `setup` | Validate Azure Linux 3.0/MSHV prerequisites and install or verify the pinned OpenVMM package. |
-| `create` | Validate prebuilt inputs, compose the initrd, generate the IGVM, and optionally sign its SNP ID block. |
-| `launch` | Start supervised OpenVMM, create/resume the VM, and wait for the sample guest response. |
-| `destroy` | Stop owned processes, remove owned sockets, and retain logs/evidence. |
-
-Most image composition already lives in the CLI rather than external scripts.
-Remaining demo coupling is concentrated in:
-
-- **Artifact delivery:** The wheel packages a dependency archive, `enclave_app`,
-  and `enclave-init`; release retrieval is not implemented.
-- **Input compatibility:** The bundle requires a specific manifest/profile and
-  compatible image-generation tooling. The application is a static x86-64 ELF.
-- **Startup and readiness:** The default `/init` runs
-  `/bin/enclave_app serve-vsock 4050`. Launch requires the sample JSON exchange
-  and an SNP-shaped response on that port.
-- **Runtime configuration:** Launch uses one CPU, 160 MiB, a fixed PCIe/vsock
-  layout, and one active managed runtime per host.
-
-The initial abstraction removes dependency delivery/build coupling, not every
-sample protocol constraint. Customers can already override the application and
-init script, but those inputs must remain compatible with launch.
-
-## 3. Target design and agreed decisions
-
-The **dependency triple** is the **L2 kernel, base initrd, and SNP boot shim**.
-It is a subset of the **dependency bundle**, which also carries `igvmfilegen`,
-IGVM configuration, and provenance records. The bundle remains the pipeline
-output and create input; the triple is not a new input format.
-
-| Boundary | Agreed design |
-| --- | --- |
-| Dependency builds | Run the existing `build-igvm-dependencies.sh` script in a separate pipeline and publish its dependency bundle output. The script owns source/toolchain pinning and reproducibility of the triple; create does not rebuild or assemble that bundle. |
-| Application builds | Customers or the samples repository build the executable. Application reproducibility scripts stay in that repository. The default `enclave_app` will live in the same public dependency/sample repository. |
-| Default resources | Add a retrieval stub/placeholder in `setup.py`, then retrieve external release resources during extension wheel construction and package them in the wheel as the no-override defaults. Keep existing defaults until this works. The external repository/pipeline owns dependency versions; the extension does not maintain independent component pins. Repository, release assets, and compatibility versions remain TBD. This is separate from `az enclave setup`. |
-| Customer overrides | Retain `--dependency-bundle`, `--application`, and `--init-script`. Explicit parameters override the corresponding defaults; customers provide and are responsible for compatible custom resources. Other inputs retain their defaults. Individual artifact options are not required. |
-| Create | Consume the dependency bundle and prebuilt application; unpack the bundle's base initrd; install the application and base init script; repack; generate the IGVM and expected measurements; optionally sign its SNP ID block; export a launch profile. |
-| Startup | The external repository will contain all default resources before the extension release, including the dependency bundle, sample application, and default init script. Keep the existing `--init-script` replacement option; application selection remains independent of dependency selection. |
-| Lifecycle | Preserve lifecycle ownership and teardown behavior. Extend launch configuration to consume the image-bound profile instead of hard-coded resources/devices; define profile selection without redesigning destroy. Verify cleanup and fix gaps as part of implementation. |
-
-```text
-Existing dependency build script -> pipeline output: dependency bundle
-    (triple + compatible tooling/profile + metadata)
-Samples/customer build -> prebuilt application
-    -> wheel build: retrieve external resources -> package defaults in extension
-       (customer-provided parameter overrides take precedence)
-    -> create: unpack -> install app and /init -> repack -> generate -> optional sign
-       -> final IGVM + launch profile
-    -> launch: validate profile/image -> configure OpenVMM -> existing lifecycle
-    -> destroy using the existing lifecycle contract
-```
-
-### Image-bound launch configuration
-
-**Proposed, not implemented:** Create exports a versioned launch profile
-alongside the IGVM, derived from the exact effective IGVM JSON used to build it,
-not a later copy of the bundle configuration. Launch validates the profile and
-its image hash before constructing the OpenVMM request through shared mapping
-logic. This extends the earlier largely-unchanged launch scope only for
-configuration; readiness and process-management responsibilities remain intact.
-
-**Selection rules:** Create writes `<image-filename>.launch.json` adjacent to
-the final image (for example, `custom.igvm.launch.json`). Launch uses an explicit
-profile path when supplied, otherwise discovers that adjacent file. The exact
-option name is not finalized. A present profile must pass schema, settings,
-and image-hash validation; an explicitly supplied missing/unreadable path is
-an input error, not permission to ignore the requested profile.
-
-If no explicit profile is requested and no adjacent launch profile exists, launch
-continues with today's hard-coded resource/device settings and logs a visible
-warning identifying that fallback, including one CPU and 160 MiB of memory.
-No opt-in compatibility flag is required. This preserves existing image usage
-but does not prove that the image is compatible with those settings.
-
-**Current runtime settings source:** `create_request()` in
-[`azext_enclave/_rpc.py`](azext_enclave/_rpc.py) hard-codes one CPU, 160 MiB of memory,
-PCIe segment 0/buses 0-1, and the low/high MMIO windows. It also configures
-COM1 and the vsock attachment. These settings are defined in launch code,
-not read from the dependency bundle's IGVM JSON; the proposed missing-profile
-fallback retains them.
-
-| Profile setting | Source and purpose |
-| --- | --- |
-| Schema version | Identifies the profile contract so launch can reject unsupported formats rather than guess field meanings. |
-| Final IGVM SHA-256 | Binds the profile to the published image, including optional ID-block signing, to detect accidental mismatches. This is not publisher authentication or attestation verification. |
-| Virtual CPU count | Derived from `processor_count`; tells OpenVMM how many processors to provide, matching image expectations. |
-| Memory size | Derived from `memory_page_count` using the supported profile's 4-KiB pages, converted to OpenVMM units with exactness/range checks; supplies the guest's required memory. |
-| PCIe segment and bus range | Derived from `pcie_host_bridge`; identifies the PCIe address space in which the guest expects devices. |
-| Low/high MMIO bases and sizes | Derived from `pcie_host_bridge`; reserves the device memory windows described by the measured image configuration. |
-| ECAM base / supported layout | Records where the guest expects PCIe configuration space. Map it only if the runtime exposes that setting; otherwise validate the layout against the pinned runtime and reject unsupported values. Do not silently drop it. |
-
-**Proposed launch profile structure:** This diagram groups the stored data; it is not
-a finalized JSON schema. Example resource/device values reflect the current
-packaged configuration, not fixed defaults for every image.
-
-```text
-Default dependency bundle (currently packaged in the extension)
-    manifests/snp-linux-direct.json defines the default IGVM settings
-    (selected through dependency-manifest.v1.json's igvm_manifest entry)
-    |
-    | --dependency-bundle selects a customer bundle instead, if supplied
-    v
-Create: read selected bundle's IGVM JSON; apply guest-debug override
-    |
-    v
-Exact effective IGVM JSON used by create
-    |                                           Final custom.igvm
-    | supported resource/device settings        (unsigned by default;
-    |                                            SNP ID block signed only
-    |                                            with --signing-key)
-    |                                               |
-    v                                               | SHA-256
-+---------------------------------------------------v------------------+
-| custom.igvm.launch.json (adjacent JSON launch profile)                |
-|                                                                     |
-| Contract and image binding                                           |
-|   Schema version: identifies the supported profile format            |
-|   Final IGVM SHA-256: hash of custom.igvm's published bytes            |
-|                                                                     |
-| Guest resources                                                      |
-|   Virtual CPU count: 1 (from processor_count)                         |
-|   Memory size: 160 MiB (from 40960 x 4-KiB pages)                      |
-|                                                                     |
-| Measured PCIe layout                                                 |
-|   Segment: 0; bus range: 0-1                                         |
-|   Low MMIO:  base 0xf7000000,  size 16 MiB                            |
-|   High MMIO: base 0x100000000, size 1 MiB                              |
-|   ECAM base: 0xf6e00000 / supported layout                            |
-+---------------------------------------------------------------------+
-    |
-    v
-Launch: validate schema + settings + hash against custom.igvm
-    |
-    v
-Shared mapping -> OpenVMM resource/device configuration
-    +
-Launch-generated host sockets, serial connections, vsock attachment,
-and process ownership (not stored in the launch profile)
-```
-
-The JSON is not a complete OpenVMM configuration. Host socket paths, serial
-connections, process ownership, and vsock device attachment remain generated by
-launch; the profile must not accept arbitrary executable paths or process
-arguments. Image-only settings such as kernel command line and SNP image policy
-remain in the image-generation configuration, not blindly copied into RPC fields.
-
-Validate CPU/memory limits, unit conversions, bus ranges, MMIO alignment/overlap,
-and generator/runtime support. Publish the IGVM and profile consistently, and
-reject malformed, mismatched, or unsupported profiles with actionable errors;
-do not fall back when a present profile is invalid. The missing-profile path
-uses the original configuration with a warning, not inferred image settings.
-
-### Customer customization and build workflow
-
-The following describes **existing overrides**, not proposed individual-artifact
-flags. Defaults are currently packaged; the target design changes their source
-to repository releases, not the customer's responsibility for custom inputs.
-
-| Component | What the customer can change | How to build and supply it |
-| --- | --- | --- |
-| L2 kernel | Kernel image and enabled guest features/drivers; not the L1 host kernel. | Build a compatible x86-64 kernel externally, replace the bundle's kernel artifact, and supply the complete bundle through `--dependency-bundle`. |
-| Base initrd | Guest filesystem, libraries, utilities, and supporting files. | Build a gzip-compressed cpio initrd externally and replace its bundle artifact. Create subsequently overwrites `/bin/enclave_app` and `/init` with the separately selected inputs. |
-| SNP boot shim | Compatible early-boot implementation/version. | Build externally using the supported OpenVMM toolchain and replace its bundle artifact. Kernel/shim/profile compatibility remains the customer's responsibility. |
-| IGVM configuration | Kernel command line and compatible image/SNP settings. | Edit the bundle's IGVM JSON and update its manifest hash. Today resource/device changes must match hard-coded launch settings; the proposed launch profile will carry supported settings into launch. Create overrides the JSON's guest-debug setting. |
-| `igvmfilegen` | Compatible image-generation tool/version. | Build externally and replace the executable bundle artifact. It must support the CLI's generator commands and measurement/signing outputs; it is not the host OpenVMM runtime. |
-| Application | Customer workload logic in one static x86-64 ELF executable. | Build using the customer's toolchain or sample recipe; supply its binary with `--application`. Source directories and container images are not accepted. |
-| Init script | Guest initialization, application arguments, and environment. | Supply a shebang script with LF line endings through `--init-script`. This replaces all of guest `/init`, including mounts/initialization, rather than adding a post-start hook. |
-
-**Building a custom bundle:** Start from the existing dependency-build script
-linked in the references. It builds pinned sources with Rust/Cargo and Docker
-and emits the complete bundle; it does not accept arbitrary prebuilt artifact
-paths. Its local-source options require clean checkouts at the pinned revisions.
-For customized components, maintain an explicit derivative build recipe or
-replace artifacts in a private copy of a compatible bundle after building them
-externally. Do not expect create to perform those builds.
-
-Keep `dependency-manifest.v1.json` paths and SHA-256 hashes consistent with every
-replaced artifact, and update accompanying build/provenance records and
-`SHA256SUMS` when present. Do not retain default-build provenance for custom
-outputs. The reader validates all manifest-listed artifacts; regenerating hashes
-does not prove authenticity or boot compatibility.
-
-**Building a custom application:** The sample `build-enclave-app.sh` builds the
-Rust `enclave_app` package with `--release --locked`, defaulting to
-`x86_64-unknown-linux-musl`. The script requires the sample workspace and build
-dependencies, not just the script file. Customers can adapt that source/build
-recipe or use another language/toolchain that produces the accepted static ELF.
-Application reproducibility remains in the sample/customer build workflow.
-
-For example, after building compatible inputs on Linux:
+Proposed usage on the local Linux L1 host:
 
 ```bash
-az enclave create \
-    --dependency-bundle "$HOME/custom-dependencies" \
-    --application "$HOME/build/my-app" \
-    --init-script "$HOME/my-init" \
-    --workspace "$HOME/enclave-build" \
-    --output-file "$HOME/images/custom.igvm"
+sudo az enclave status --output table
+sudo az enclave status --name demo-1 --output json
+sudo az enclave status --name demo-1 --state-dir /path/to/instances --output json
 ```
 
-Omit a resource option to retain that resource's default. A custom bundle does
-not select an application or init script implicitly. Use returned measurements
-for the rebuilt image, then launch it using the existing command.
+Without `--state-dir`, list every retained instance in
+`/var/lib/enclave/instances`, not just those recorded as running. Include failed,
+starting, paused, and destroy-failed records as well as running/destroyed
+records, since all can reserve names or require investigation.
 
-### Defaults and compatibility constraints
+Without `--name`, return a compact list of names and observed states. Preserve
+states such as `starting`, `failed`, `exited`, and `unknown` rather than forcing
+every entry into running/destroyed. A destroyed result requires a recorded
+successful destroy and no remaining owned processes; an unexpected runtime exit
+is not equivalent to successful destruction.
 
-Values below are from the currently packaged bundle and CLI, not promised values
-for every future dependency release.
+With `--name`, return details for exactly that instance in the selected state
+root. Report a missing name as an actionable error, not an empty successful
+result. Both forms support `--state-dir`; named inspection adds the information
+below without requiring a separate show command.
 
-| Source | Current values | Effect on customization |
-| --- | --- | --- |
-| Bundle IGVM profile | `guest_arch: x64`, `guest_svn: 1`, `max_vtl: 0`; SNP Linux-direct boot with `use_initrd: true`. | Custom images must remain within the supported x86-64 SNP profile and generator contract. |
-| Bundle image resources | `processor_count: 1`, `memory_page_count: 40960` (160 MiB), `c_bit_position: 51`. | Changing image settings does not change launch's one-CPU/160-MiB runtime configuration. |
-| Bundle kernel command line | `console=ttyS0 earlyprintk=serial earlycon panic=-1`. | Change through the bundle profile; preserve console/boot behavior needed for diagnosis. |
-| Bundle SNP settings | `policy: 196608` (`0x30000`), `injection_type: normal`, `secure_avic: disabled`, `shared_gpa_boundary_bits: null`. | Advanced policy changes require compatibility validation. The bundle records `enable_debug: true`, but create forces it off unless CLI `--debug` is supplied. |
-| Bundle measured PCIe layout | Segment 0, buses 0-1; ECAM base `0xf6e00000`; low MMIO base `0xf7000000`, size 16 MiB; high MMIO base `0x100000000`, size 1 MiB. | Keep the measured layout compatible with launch; editing the bundle does not reconfigure the runtime devices. |
-| Default init/application startup | Application installed as `/bin/enclave_app`; script executes `serve-vsock 4050`. | A replacement executable must accept those arguments or use a matching custom init script. |
-| CLI readiness | Port 4050; newline-delimited challenge/payload JSON with payload `hello world`; requires an SNP-shaped report. | This is enforced by launch, not merely an application default. Different protocols/ports require future readiness work. No attestation verification or key release is performed by launch. |
-| CLI composition | `SOURCE_DATE_EPOCH` defaults to 0; normalized cpio metadata and timestamp-free gzip; unsigned unless `--signing-key` is supplied. | Control inputs/tool versions for reproducibility. Changes to image contents/configuration can change expected measurements. |
-
-## 4. Required changes
-
-| Area | Remaining work |
+| Output information | Purpose |
 | --- | --- |
-| Naming | Use `enclave` for the extension and command group, and `azext_enclave` for the Python package. State uses `/var/lib/enclave/instances` and the host guard uses `/run/enclave/enclave.lock`. Stop old runtimes and retire old installations before upgrading; no automatic state migration or mixed-version launches. |
-| Resource retrieval | Add the `setup.py` placeholder first, then connect it to external releases during wheel construction, with integrity checks, recorded release identity, and explicit errors. The external release owns component versions; release/compatibility selection remains TBD. Verify retrieval in the wheel-build workflow, not during customer installation. |
-| Default migration and overrides | Keep current defaults until retrieval works; replace locally maintained resource payloads with build-fetched resources while retaining their inclusion in the wheel. Package all required defaults published before extension release. Preserve per-resource parameter precedence and customer compatibility responsibilities. The stub must not pretend retrieval succeeded. |
-| Pipeline and create contract | Run the existing dependency-build script in the pipeline and publish its bundle, including the triple, tooling/profile, and metadata. Reuse existing validation, composition, and optional signing; do not compile dependencies or applications in create. |
-| Image-bound launch profile | Define the schema and shared mapping; export the adjacent launch profile bound to the final IGVM. Support explicit profile selection, automatic discovery, and the original hard-coded settings with a visible warning when no launch profile is found. Reject invalid profiles rather than falling back. Test both paths, conversions, unsupported layouts, mismatches, and guest boot. |
-| Reproducibility and validation | Verify repository defaults and custom overrides, retrieval failures, output safety, retention, and signing. Compare controlled repeated initrd/IGVM builds and measurements; characterize signed outputs separately. Update help and run Linux image-build/guest tests. |
-| Launch/destroy cleanup | Verify existing cleanup for success, failure/timeout, child exits, interrupted teardown, and repeated destroy; fix uncovered gaps. Confirm owned processes are reaped, sockets removed, guards released only after process exit, and logs/evidence retained. |
+| Name and instance directory | Identify the occupied launch name and the state root to use for follow-up commands. |
+| Recorded lifecycle status | Show the last persisted outcome, such as `running`, `failed`, or `destroyed`. |
+| Observed runtime state | Check the recorded supervisor/OpenVMM identities using existing ownership helpers. Distinguish live processes, exited processes, and unknown/inconsistent state rather than treating a saved `running` value as proof of liveness. |
+| Name availability | Indicate that an existing instance directory reserves the name, even if its runtime has exited or been destroyed. Do not imply that destroy makes the name reusable. |
+| Log locations | Show the paths to `com1.log` (guest output), `openvmm.log` (runtime output), and `supervisor.log` (worker output/errors). Report logs not yet created as unavailable rather than creating them. |
+| Image and runtime details | Identify the selected IGVM and the recorded supervisor/OpenVMM process identities, with observed liveness clearly distinguished from saved metadata. |
+| Retained response and errors | Locate `response.json` when present and expose recorded launch, destroy, worker, or cleanup failures to support diagnosis. Evidence collection does not imply attestation verification. |
+| Lifecycle timestamps | Show when the instance record was created and when its recorded lifecycle status last changed, helping users distinguish old retained instances from recent activity. |
+
+Keep the unnamed listing limited to name and state in both table and structured
+output. Named inspection exposes recorded status, process observations,
+instance location, and individual log paths in structured output, with a readable
+summary for table output. Host-guard warnings apply to both forms and must not
+be lost when presenting the compact list.
+Users can inspect guest output with, for example,
+`sudo tail -f /var/lib/enclave/instances/<name>/com1.log`.
+Status locates logs; streaming or downloading them is not part of this change.
+
+### Lifecycle timestamps
+
+Persist `created_at` when launch first creates the instance record and
+`status_changed_at` when a lifecycle operation changes its recorded status.
+Use timezone-aware UTC timestamps in a consistent ISO 8601 format. Keep creation
+time immutable; reading status must not update either timestamp.
+
+Expose both values in named status details while keeping the unnamed list
+compact. These timestamps describe recorded lifecycle events, not continuous
+health monitoring: an unexpected process exit need not have a recorded exit
+time. Show timestamps as unavailable for older records that lack them, rather
+than inferring them from filesystem modification times.
+
+### Discovery and read-only behavior
+
+Reuse existing state-directory validation, record parsing, and full process
+identity checks. Status must not start/stop processes, invoke teardown, rewrite
+lifecycle records, remove evidence, or acquire the exclusive runtime lease
+needed by launch. It must work while an enclave is running and enforce the
+same local access protections as other lifecycle commands.
+
+Treat results as a point-in-time snapshot. Display missing, malformed,
+unreadable, or inconsistent records explicitly instead of silently omitting
+an occupied name or reporting it as healthy. An absent default state root can
+be reported as no recorded instances without creating it; an explicitly
+requested missing/unreadable root should produce an actionable error.
+
+Listing is scoped to the selected state root. Because the runtime guard is
+host-wide, also report whether that guard is occupied without retaining its
+lock. If it is occupied but no matching live instance is discoverable in the
+selected root, explicitly report that the owner may be in another state root
+or cannot be identified; an empty list must not imply the host is free.
+Automatic discovery of every custom state root would require additional
+tracking and is not assumed by this proposal.
+
+### Launch error guidance
+
+Update the existing name-conflict error to recommend
+`az enclave status`, preserving `--state-dir` when a custom root was used.
+Explain that retained evidence reserves the name and that the user should
+choose a new `--name`; recommend `az enclave status --name <name>` to inspect
+the retained instance. Do not recommend destroying a stopped instance as a way
+to release its name.
+
+Update the host-guard conflict error to recommend status to identify the
+blocking runtime, then `az enclave destroy --name <name>` with the matching
+state root. If the owner is outside the selected root, keep the discovery
+limitation visible rather than guessing a name or suggesting forceful cleanup.
+
+### Implementation and validation
+
+Register the command/help/arguments and delegate through `custom.py` to
+read-only lifecycle/state inspection. Reuse ownership and log-path helpers,
+but do not call launch/destroy paths that create directories or mutate state.
+Add distinct list/detail result formatting so the compact list stays small
+while named inspection retains structured log and diagnostic fields.
+
+Test empty roots; running, destroyed, and failed instances; stale `running`
+records; missing/corrupt records and logs; custom roots; and a busy host guard
+whose owner is not listed. Verify occupied names remain visible, status does
+not modify records or interrupt live runtimes, and both launch-conflict errors
+provide correct status guidance. Test named inspection of existing and missing
+names, custom-root selection, and the difference between the compact list and
+detailed results. Keep the appendix's current command reference unchanged until
+the command is implemented.
+Verify creation time remains unchanged across transitions, last-change time
+updates only when status changes, status reads do not modify timestamps, and
+legacy records without timestamps remain inspectable.
+
+## 2. Proposed change: `az enclave cleanup` and `destroy --cleanup`
+
+Keep read-only inspection, runtime shutdown, and removal of retained evidence
+as distinct operations:
+
+| Operation | Responsibility |
+| --- | --- |
+| `az enclave status` | List retained names and states without modifying them. |
+| `az enclave status --name <name>` | Inspect one instance, its runtime observations, logs, and errors. |
+| `az enclave destroy --name <name>` | Stop the owned runtime and remove runtime sockets, retaining records and logs by default. |
+| `az enclave cleanup --name <name>` | Remove a stopped instance's retained directory and release its name. Refuse cleanup while either owned process is alive. |
+| `az enclave destroy --name <name> --cleanup` | Stop the owned runtime, confirm shutdown, then remove its retained directory using the same cleanup implementation. |
+| `az enclave cleanup --name <name> --dry-run` | Preview retained-state removal and report blockers without deleting files or stopping processes. |
+| `az enclave destroy --name <name> --cleanup --dry-run` | Preview shutdown followed by retained-state removal without performing either step. |
+
+Use `cleanup` rather than `delete` to distinguish removal of retained state
+from runtime destruction. Destroy already removes runtime resources and
+sockets; the new `--cleanup` option specifically opts into deleting records,
+logs, and response evidence. Without this option, destroy retains its current
+behavior and does not release the instance name.
+
+The cleanup command should require an explicit name, honor `--state-dir`,
+coordinate with lifecycle locks, and verify that neither owned process is
+alive. If either is alive, refuse removal and direct the user to destroy first.
+If ownership or shutdown cannot be established, report that uncertainty rather
+than treating missing or corrupt records as proof that deletion is safe.
+
+Require confirmation that retained records, logs, and response evidence will
+be deleted. Limit removal to the validated instance directory; preserve the
+original IGVM and other external inputs. Release the name only after removal
+succeeds, and surface partial failures explicitly so status can still identify
+remaining state. Do not remove shared locks in a way that permits concurrent
+commands to bypass lifecycle coordination.
+
+The intended workflow is **list -> inspect -> destroy -> cleanup**.
+`destroy --cleanup` combines the last two steps as an explicit convenience,
+not a change to the default retention policy. Both cleanup paths must share
+validation and deletion confirmation; obtain confirmation before starting
+the combined destructive operation. Hold lifecycle coordination across shutdown
+and removal, and recheck owned-process exit before deleting retained files.
+
+If destruction fails or shutdown is unconfirmed, skip cleanup and retain the
+evidence. If shutdown succeeds but file removal fails, report that distinction
+and the remaining state location rather than claiming complete success. The
+user can inspect the retained state and retry standalone cleanup.
+
+### Dry-run preview
+
+`--dry-run` should show the resolved instance directory, files/directories
+targeted for removal, whether the name would be released, and the external
+image/inputs that will be preserved. Apply the same path, ownership, and
+process-identity checks used for actual cleanup. If standalone cleanup is
+blocked by a live or unverifiable runtime, explain the blocker rather than
+presenting the plan as safe to execute.
+
+For `destroy --cleanup --dry-run`, show shutdown as the first planned step
+and removal as conditional on confirmed shutdown. Do not send RPC shutdown
+requests, signal processes, modify records/logs, or delete files. A preview
+does not reserve the name or authorize later deletion; execution must revalidate
+the instance under lifecycle coordination and obtain normal confirmation.
+
+Validate standalone cleanup of stopped and destroyed instances, rejection of
+live or unverifiable runtimes, confirmation cancellation, custom state roots,
+and concurrent lifecycle commands. Test both successful and failed
+`destroy --cleanup` paths, including partial file-removal failures. Verify
+ordinary destroy still retains evidence, cleanup preserves external images,
+and a name becomes reusable only after its instance directory is removed.
+Verify both dry-run forms leave processes and retained files unchanged, show
+the same targets as real cleanup, report blockers, and require revalidation
+when the instance changes between preview and execution.
+
+## 3. Existing fixes and follow-up work
+
+Retain the existing work items below while shifting the detailed proposal to
+status and discoverability. Each row explains why the change matters as well
+as its implementation or validation work; these are not all completed fixes.
+
+| Area | Purpose | Remaining work |
+| --- | --- | --- |
+| CLI core support floor | Make the declared minimum CLI version reflect tested behavior. This avoids accepting installations whose CLI APIs cannot actually run the extension. | Establish an evidence-based `azext.minCliCoreVersion`: the inherited `2.0.67` value is a declared minimum, not a validated support floor. Inventory the CLI APIs used and test candidate older core versions for extension installation/discovery, help, argument wiring, and setup/create/launch/destroy behavior on the supported Linux host. Set the minimum to the oldest verified version and document the tested range and rationale in the README. Metadata-gate tests alone do not prove runtime compatibility; leaving the maximum unset does not guarantee compatibility with future breaking changes. |
+| Naming | Make command, package, and state naming consistent. Define the upgrade boundary so old and new installations are not accidentally used together. | Use `enclave` for the extension and command group, and `azext_enclave` for the Python package. State uses `/var/lib/enclave/instances` and the host guard uses `/run/enclave/enclave.lock`. Stop old runtimes and retire old installations before upgrading; no automatic state migration or mixed-version launches. |
+| Resource retrieval | Obtain default resources from the release that owns their versions instead of independently maintaining copies. Keep retrieval in wheel construction so customer installation does not need to fetch build inputs. | Add the `setup.py` placeholder first, then connect it to external releases during wheel construction, with integrity checks, recorded release identity, and explicit errors. The external release owns component versions; release/compatibility selection remains TBD. Verify retrieval in the wheel-build workflow, not during customer installation. |
+| Default migration and overrides | Change how defaults are supplied without breaking existing no-override usage. Preserve customers' ability to replace individual supported inputs independently. | Keep current defaults until retrieval works; replace locally maintained resource payloads with build-fetched resources while retaining their inclusion in the wheel. Package all required defaults published before extension release. Preserve per-resource parameter precedence and customer compatibility responsibilities. The stub must not pretend retrieval succeeded. |
+| Pipeline and create contract | Keep dependency compilation in a reproducible external build pipeline. Let create remain an image-composition command that consumes already-built inputs. | Run the existing dependency-build script in the pipeline and publish its bundle, including the L2 kernel/base initrd/SNP boot shim, tooling/profile, and metadata. Reuse existing validation, composition, and optional signing; do not compile dependencies or applications in create. |
+| Image-bound launch profile | Keep runtime resources/devices consistent with the configuration used to build the image. Binding the profile to the final image helps detect accidentally mixed artifacts. | Define the schema and shared mapping; export the adjacent launch profile bound to the final IGVM. Support explicit profile selection, automatic discovery, and the original hard-coded settings with a visible warning when no launch profile is found. Reject invalid profiles rather than falling back. Test both paths, conversions, unsupported layouts, mismatches, and guest boot. |
+| Reproducibility and validation | Establish that defaults and supported overrides produce reliable, explainable artifacts. Cover failure and retention behavior as well as successful builds so failures do not look like success. | Verify repository defaults and custom overrides, retrieval failures, output safety, retention, and signing. Compare controlled repeated initrd/IGVM builds and measurements; characterize signed outputs separately. Update help and run Linux image-build/guest tests. |
+| Launch/destroy cleanup | Prevent orphaned owned processes or sockets from blocking later launches. Retain diagnostic evidence while releasing runtime resources only after shutdown is confirmed. | Verify existing cleanup for success, failure/timeout, child exits, interrupted teardown, and repeated destroy; fix uncovered gaps. Confirm owned processes are reaped, sockets removed, guards released only after process exit, and logs/evidence retained. |
 
 These are planned changes and validation criteria, not completed implementation
 or findings that lifecycle bugs necessarily exist.
-
-## 5. Deferred improvements and open questions
-
-**Deferred:** Individual kernel/initrd/boot-shim overrides; resolved-input
-provenance export; modular sample workload/transport/attestation libraries;
-generic readiness; independent guest-debug/logging controls; and richer
-multi-file or multi-process workloads. These are not prerequisites for the
-agreed initial scope.
-
-**Target host follow-up:** Validate the planned commercially available Azure
-Linux 4/MSHV image when details arrive in November 2026. Current setup remains
-Azure Linux 3.0-specific.
-
-**Open implementation questions:**
-
-- Which public repository/release assets and compatibility versions will be used?
 
 ## Appendix: Current code flow and command reference
 
@@ -341,6 +289,15 @@ lists non-Python resources in `package_data`. It declares `grpcio` and
 `protobuf` as runtime dependencies; these are separate from the guest dependency
 bundle. The generated protobuf Python module is already in the checkout.
 Packaging does not run `protoc` or regenerate the protocol bindings.
+Protocol maintenance uses [`scripts/generate_protocol.py`](scripts/generate_protocol.py)
+with the upstream commit, normalized schema checksum, runtime package version,
+and generator versions in [`scripts/openvmm-protocol.json`](scripts/openvmm-protocol.json).
+`--write` explicitly fetches that pinned schema and regenerates messages and type
+stubs, including the generated module's Flake8 exemption. `--check` verifies the
+committed files offline without changing them. Runtime and protocol upgrades
+must be reviewed together and tested against the actual OpenVMM package; a
+matching schema does not guarantee unchanged runtime behavior. See the
+[maintenance instructions](README.rst) for the developer-only environment and commands.
 `azext_metadata.json` carries preview status and supported CLI-core version
 bounds, while `__init__.py` exposes the command loader used by Azure CLI.
 

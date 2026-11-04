@@ -58,6 +58,61 @@ Do not remove or update their environment/checkout while they are running.
 Existing environments created without the bootstrap need one bootstrap run
 to generate ``activate-enclave.sh``.
 
+Maintaining the OpenVMM Python bindings
+--------------------------------------
+
+OpenVMM's upstream ``vmservice.proto`` is the source of truth. Its API is not
+guaranteed compatible across releases. ``scripts/openvmm-protocol.json`` records
+the upstream tag, immutable commit, SHA-256 of the LF-normalized schema,
+generator versions, and matching Azure Linux runtime package version.
+The checked-in Python messages and type stubs are generated from that schema;
+do not edit them manually.
+
+Use a separate developer-only environment so the compiler's dependencies do
+not change the CLI's runtime environment. From ``src/enclave``::
+
+    python -m venv "$HOME/.venvs/enclave-protocol"
+    "$HOME/.venvs/enclave-protocol/bin/python" -m pip install -r scripts/requirements-protocol.txt
+    "$HOME/.venvs/enclave-protocol/bin/python" scripts/generate_protocol.py --check
+
+On Windows PowerShell, invoke the environment's
+``Scripts\python.exe`` using ``& "$HOME\.venvs\enclave-protocol\Scripts\python.exe"``.
+The script locates the extension relative to itself, so it can also be invoked
+by absolute path from another directory.
+
+``--check`` is offline and read-only. It verifies the local schema checksum,
+the runtime version pin, and that both generated files match the pinned
+compiler's output. Run it alongside the normal style and unit checks before
+submitting changes to the protocol or runtime pins.
+
+Run regeneration only when deliberately updating or restoring the bindings::
+
+    "$HOME/.venvs/enclave-protocol/bin/python" scripts/generate_protocol.py --write
+
+``--write`` downloads the schema from the pinned upstream commit, verifies its
+checksum, then generates ``vmservice_pb2.py`` and ``vmservice_pb2.pyi``. It also
+adds the generated module's file-wide ``# flake8: noqa`` exemption every time.
+No repository-wide lint configuration is needed. A bare ``protoc`` invocation
+will not preserve that marker; use this script.
+
+For an OpenVMM upgrade:
+
+1. Review the Azure Linux package sources and patches to identify the exact
+   upstream source used by the target runtime, not upstream ``main``.
+2. Update the protocol pins, independently verified schema checksum, and
+   ``RUNTIME_VERSION`` in ``azext_enclave/_runtime.py`` together. Update the
+   generator pin and ``requirements-protocol.txt`` together only if necessary.
+3. Run ``--write``, review the schema/bindings changes, and adapt the RPC client.
+4. Run ``--check``, ``azdev style enclave --pep8``, and unit tests. Test setup,
+   VM creation/resume, status queries, and teardown/quit against the actual
+   target OpenVMM package on Azure Linux before accepting the upgrade.
+5. Commit the pins, schema, bindings, client changes, and tests together.
+
+Schema generation cannot prove runtime behavior compatibility. Keep the
+runtime guard enabled; ``--allow-untested-runtime`` bypasses this protection.
+Neither installation, wheel packaging, nor normal CLI commands run regeneration
+or download a newer schema.
+
 Extension commands
 --------
 
