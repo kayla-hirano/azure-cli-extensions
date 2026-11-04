@@ -1,6 +1,6 @@
 # Enclave current design and command reference
 
-For proposed improvements, see [DESIGN.md](DESIGN.md).
+For proposed improvements, see [NEW_DESIGN.md](NEW_DESIGN.md).
 
 These options describe today's CLI, not the target release-provider behavior.
 No Azure login is required for local Enclave operations. Customers install Azure
@@ -10,7 +10,7 @@ initially; the intended source after merge is
 [upstream](https://github.com/Azure/azure-cli-extensions).
 With wheel installation, install the extension separately for the normal user
 and root. Developer installations share the environment but use separate CLI
-configuration directories. Follow the [README](README.rst) for exact installation
+configuration directories. Follow the [README](../README.rst) for exact installation
 and privileged invocation instructions.
 
 ## Overall extension code flow
@@ -24,8 +24,8 @@ is no separate supervisor service or in-memory state daemon.
 
 **Building the extension wheel is not building a guest IGVM.** The documented
 build command is `azdev extension build enclave`, run in the developer
-environment described in the [README](README.rst). It packages the Python
-extension and existing default resources using [`setup.py`](setup.py).
+environment described in the [README](../README.rst). It packages the Python
+extension and existing default resources using [`setup.py`](../setup.py).
 
 ```text
 Prepared checkout: src/enclave/
@@ -63,15 +63,15 @@ lists non-Python resources in `package_data`. It declares `grpcio` and
 `protobuf` as runtime dependencies; these are separate from the guest dependency
 bundle. The generated protobuf Python module is already in the checkout.
 Packaging does not run `protoc` or regenerate the protocol bindings.
-Protocol maintenance uses [`scripts/generate_protocol.py`](scripts/generate_protocol.py)
+Protocol maintenance uses [`scripts/generate_protocol.py`](../scripts/generate_protocol.py)
 with the upstream commit, normalized schema checksum, runtime package version,
-and generator versions in [`scripts/openvmm-protocol.json`](scripts/openvmm-protocol.json).
+and generator versions in [`scripts/openvmm-protocol.json`](../scripts/openvmm-protocol.json).
 `--write` explicitly fetches that pinned schema and regenerates messages and type
 stubs, including the generated module's Flake8 exemption. `--check` verifies the
 committed files offline without changing them. Runtime and protocol upgrades
 must be reviewed together and tested against the actual OpenVMM package; a
 matching schema does not guarantee unchanged runtime behavior. See the
-[maintenance instructions](README.rst) for the developer-only environment and commands.
+[maintenance instructions](../README.rst) for the developer-only environment and commands.
 `azext_metadata.json` carries preview status and supported CLI-core version
 bounds, while `__init__.py` exposes the command loader used by Azure CLI.
 
@@ -89,7 +89,7 @@ for the normal user and root as documented above; host setup, image creation,
 and launch remain explicit commands.
 
 Developer bootstrap is an alternative to wheel installation:
-[`scripts/bootstrap-dev.sh`](scripts/bootstrap-dev.sh) creates or reuses a
+[`scripts/bootstrap-dev.sh`](../scripts/bootstrap-dev.sh) creates or reuses a
 virtual environment, configures azdev and isolated CLI directories, registers
 the extension, and installs it in editable mode with Python dependencies.
 It checks imports but does not build a wheel or start a VM. Editable source
@@ -133,7 +133,7 @@ Create's private build workspace is distinct from launch's instance state.
 It holds extracted dependencies, rootfs/initrd, effective IGVM JSON, resource
 paths, generator outputs, and stage logs. Normally only the final IGVM is
 published and the workspace is removed; `--keep-intermediates` retains it.
-The image-bound launch profile proposed in [DESIGN.md](DESIGN.md) is not yet exported.
+The image-bound launch profile proposed in [NEW_DESIGN.md](NEW_DESIGN.md) is not yet exported.
 
 `custom.py` keeps CLI handling separate from these implementations. For
 launch/destroy results, `_instance_result()` omits internal executable and
@@ -392,8 +392,8 @@ deactivating does not stop instances; reboot does not automatically restart them
 
 ## References
 
-- [Installation and usage](README.rst)
-- [Arguments](azext_enclave/_params.py), [help](azext_enclave/_help.py), and [handlers](azext_enclave/custom.py)
-- [Image builder](azext_enclave/_image_builder.py), [host setup](azext_enclave/_setup.py), and [lifecycle](azext_enclave/_lifecycle.py)
+- [Installation and usage](../README.rst)
+- [Arguments](../azext_enclave/_params.py), [help](../azext_enclave/_help.py), and [handlers](../azext_enclave/custom.py)
+- [Image builder](../azext_enclave/_image_builder.py), [host setup](../azext_enclave/_setup.py), and [lifecycle](../azext_enclave/_lifecycle.py)
 - [Dependency build script](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/enclave/scripts/build-igvm-dependencies.sh&version=GBfeature/modular-igvmfile-generation)
 - [Application build script](https://msazure.visualstudio.com/One/_git/ACC-CVM-Tooling?path=/src/ace/scripts/build-enclave-app.sh&version=GBusers/kpostiglione/ace-skr-demo)
