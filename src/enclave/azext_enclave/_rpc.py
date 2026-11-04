@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal, Optional, Union, overload
 
 import grpc
-from google.protobuf.empty_pb2 import Empty
+from google.protobuf import empty_pb2
 from knack.util import CLIError
 
 from .rpc import vmservice_pb2 as vm
@@ -76,19 +76,17 @@ class VmClient:
     @overload
     def call(self, method: Literal['PropertiesVM'], request: None = None) -> vm.PropertiesVMResponse:
         """Describe the typed state-query response for static analysis."""
-        ...
 
     @overload
     def call(self, method: Literal['CreateVM', 'ResumeVM', 'TeardownVM', 'Quit'],
-             request: Optional[vm.CreateVMRequest] = None) -> Empty:
+             request: Optional[vm.CreateVMRequest] = None) -> empty_pb2.Empty:
         """Describe the empty acknowledgments returned by supported lifecycle operations."""
-        ...
 
     def call(self, method: str, request: Optional[vm.CreateVMRequest] = None
-             ) -> Union[vm.PropertiesVMResponse, Empty]:
+             ) -> Union[vm.PropertiesVMResponse, empty_pb2.Empty]:
         """Serialize a service request and turn transport/status failures into actionable CLI errors."""
-        message = request if request is not None else Empty()
-        response_type = vm.PropertiesVMResponse if method == 'PropertiesVM' else Empty
+        message = request if request is not None else empty_pb2.Empty()
+        response_type = vm.PropertiesVMResponse if method == 'PropertiesVM' else empty_pb2.Empty
         if method == 'PropertiesVM':
             message = vm.PropertiesVMRequest()
         # Bind to the pinned upstream service without another generated grpc stub dependency.

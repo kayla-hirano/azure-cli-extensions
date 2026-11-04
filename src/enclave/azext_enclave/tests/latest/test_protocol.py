@@ -38,7 +38,7 @@ class ProtocolGenerationTest(unittest.TestCase):
             'RUNTIME_VERSION = {!r}\n'.format(self.pins['runtime_version']), encoding='utf-8')
         (self.rpc / 'vmservice.proto').write_bytes(self.schema)
         self.outputs = {
-            'vmservice_pb2.py': b'# flake8: noqa\nVALUE = 1\n',
+            'vmservice_pb2.py': b'# -*- coding: utf-8 -*-\n# flake8: noqa\n# pylint: skip-file\nVALUE = 1\n',
             'vmservice_pb2.pyi': b'VALUE: int\n',
         }
         for name, content in self.outputs.items():
@@ -172,7 +172,7 @@ class ProtocolGenerationTest(unittest.TestCase):
             workspace = Path(next(item.split('=', 1)[1] for item in command if item.startswith('--python_out=')))
             self.assertIn('--pyi_out=' + str(workspace), command)
             self.assertEqual((workspace / 'vmservice.proto').read_bytes(), self.schema)
-            (workspace / 'vmservice_pb2.py').write_bytes(b'VALUE = 1\n')
+            (workspace / 'vmservice_pb2.py').write_bytes(b'# -*- coding: utf-8 -*-\nVALUE = 1\n')
             (workspace / 'vmservice_pb2.pyi').write_bytes(b'VALUE: int\n')
             return SimpleNamespace(returncode=0)
 

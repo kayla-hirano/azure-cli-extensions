@@ -127,8 +127,9 @@ def _extract_bundle(archive_path: Path, destination: Path) -> Path:
 def _dependencies(bundle: Path) -> Dict[str, Path]:
     manifest = _read_json(_input_file(
         bundle / "dependency-manifest.v1.json"))
-    if (type(manifest.get("schema_version")) is not int
-            or manifest["schema_version"] != 1
+    version = manifest.get("schema_version")
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or version != 1
             or manifest.get("profile") != "measured-pcie-v1"
             or manifest.get("guest_arch") != "x86_64"):
         raise ValueError(
@@ -160,7 +161,7 @@ def _dependencies(bundle: Path) -> Dict[str, Path]:
                              .format(relative))
         digest = hashlib.sha256()
         with path.open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
+            for block in iter(lambda source=source: source.read(1024 * 1024), b""):
                 digest.update(block)
         if digest.hexdigest() != artifact["sha256"]:
             raise ValueError("Dependency checksum mismatch: {}".format(name))
@@ -356,6 +357,44 @@ def _sign_igvm(
     return signed
 
 
+def _validate_output_paths(
+    bundle: Path, app: Path, init: Path, key: Optional[Path],
+    parent: Path, requested_output: Path,
+) -> Path:
+    if requested_output.exists() or requested_output.is_symlink():
+        raise ValueError("Output already exists: {}".format(requested_output))
+    result = requested_output.parent.resolve() / requested_output.name
+    if (_inside(parent, bundle) or _inside(result, bundle)
+            or _inside(parent, result)
+            or result in (app, init, key)
+            or (key is not None and _inside(parent, key))):
+        raise ValueError("Workspace/output overlaps a protected input")
+    return result
+
+
+def _validate_init_and_tools(init: Path, key: Optional[Path]) -> int:
+    with init.open("rb") as source:
+        entrypoint = source.read()
+    if not entrypoint.startswith(b"#!") or b"\r" in entrypoint:
+        raise ValueError("init_script must be a shebang script with LF "
+                         "line endings")
+    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+    if not 0 <= epoch <= 0xffffffff:
+        raise ValueError("SOURCE_DATE_EPOCH must fit a newc timestamp")
+    commands = ("cpio", "gzip", "openssl") if key else ("cpio", "gzip")
+    for command in commands:
+        if shutil.which(command) is None:
+            raise ValueError("Required command not found: " + command)
+    return epoch
+
+
+def _validate_generated_image(image: Path, stage: str, *, signed: bool = False) -> None:
+    if image.is_symlink() or not image.is_file() or image.stat().st_size == 0:
+        raise IgvmBuildError(
+            "igvmfilegen did not produce a nonempty {}IGVM".format("signed " if signed else ""),
+            stage=stage)
+
+
 def build_igvm(
     *,
     dependency_bundle: Path,
@@ -425,29 +464,10 @@ def build_igvm(
         key = (_input_file(Path(signing_key))
                if signing_key is not None else None)
         parent = Path(workspace).resolve()
-        requested_output = Path(output)
-        if requested_output.exists() or requested_output.is_symlink():
-            raise ValueError("Output already exists: {}".format(output))
-        result = requested_output.parent.resolve() / requested_output.name
-        if (_inside(parent, bundle) or _inside(result, bundle)
-                or _inside(parent, result)
-                or result in (app, init, key)
-                or (key is not None and _inside(parent, key))):
-            raise ValueError("Workspace/output overlaps a protected input")
+        result = _validate_output_paths(bundle, app, init, key, parent, Path(output))
         dependencies = _dependencies(bundle) if bundle.is_dir() else None
         _validate_application(app)
-        with init.open("rb") as source:
-            entrypoint = source.read()
-        if not entrypoint.startswith(b"#!") or b"\r" in entrypoint:
-            raise ValueError("init_script must be a shebang script with LF "
-                             "line endings")
-        epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
-        if not 0 <= epoch <= 0xffffffff:
-            raise ValueError("SOURCE_DATE_EPOCH must fit a newc timestamp")
-        commands = ("cpio", "gzip", "openssl") if key else ("cpio", "gzip")
-        for command in commands:
-            if shutil.which(command) is None:
-                raise ValueError("Required command not found: " + command)
+        epoch = _validate_init_and_tools(init, key)
 
         parent.mkdir(parents=True, exist_ok=True)
         work = Path(tempfile.mkdtemp(prefix="igvm-build-", dir=str(parent)))
@@ -486,10 +506,7 @@ def build_igvm(
              "--manifest", str(manifest), "--resources", str(resources),
              "--output", str(generated)],
             stage, work, logger=logger)
-        if (generated.is_symlink() or not generated.is_file()
-                or generated.stat().st_size == 0):
-            raise IgvmBuildError(
-                "igvmfilegen did not produce a nonempty IGVM", stage=stage)
+        _validate_generated_image(generated, stage)
 
         stage = "read-measurements"
         measurements = {"snp": _snp_measurement(generated)}
@@ -499,11 +516,7 @@ def build_igvm(
             generated = _sign_igvm(
                 dependencies["igvmfilegen"], generated, key, work, logger)
             stage = "add-snp-id-block"
-            if (generated.is_symlink() or not generated.is_file()
-                    or generated.stat().st_size == 0):
-                raise IgvmBuildError(
-                    "igvmfilegen did not produce a nonempty signed IGVM",
-                    stage=stage)
+            _validate_generated_image(generated, stage, signed=True)
 
         stage = "publish"
         result.parent.mkdir(parents=True, exist_ok=True)

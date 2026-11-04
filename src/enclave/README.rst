@@ -91,7 +91,8 @@ Run regeneration only when deliberately updating or restoring the bindings::
 
 ``--write`` downloads the schema from the pinned upstream commit, verifies its
 checksum, then generates ``vmservice_pb2.py`` and ``vmservice_pb2.pyi``. It also
-adds the generated module's file-wide ``# flake8: noqa`` exemption every time.
+adds the generated module's file-wide ``# flake8: noqa`` and
+``# pylint: skip-file`` exemptions every time.
 No repository-wide lint configuration is needed. A bare ``protoc`` invocation
 will not preserve that marker; use this script.
 

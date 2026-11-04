@@ -93,8 +93,10 @@ def generate(schema: bytes, pins: Dict[str, str]) -> Dict[str, bytes]:
             ],
             cwd=workspace, check=True)
         generated = {name: normalize((workspace / name).read_bytes()) for name in GENERATED_FILES}
-    # Keep the exemption enclave-local and reproducible instead of editing repository-wide lint settings.
-    generated['vmservice_pb2.py'] = b'# flake8: noqa\n' + generated['vmservice_pb2.py']
+    # Preserve the encoding header and reapply both generated-file lint exemptions.
+    lines = generated['vmservice_pb2.py'].splitlines(keepends=True)
+    lines.insert(1, b'# flake8: noqa\n# pylint: skip-file\n')
+    generated['vmservice_pb2.py'] = b''.join(lines)
     for name, content in generated.items():
         ast.parse(content, filename=name)
     return generated

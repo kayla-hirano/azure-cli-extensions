@@ -577,6 +577,23 @@ class ImageBuilderTest(unittest.TestCase):
             self.build()
         self.run.assert_not_called()
 
+    def test_schema_version_requires_integer_one(self) -> None:
+        for version in (None, True, False, 1.0, 0, 2, '1', {}, []):
+            with self.subTest(version=version):
+                self.manifest['schema_version'] = version
+                self.write_manifest()
+                with self.assertRaisesRegex(builder.IgvmBuildError, 'Expected schema 1'):
+                    self.build()
+        self.run.assert_not_called()
+
+    def test_epoch_validation_precedes_workspace_creation(self) -> None:
+        for epoch in ('-1', '4294967296', 'not-an-integer'):
+            with self.subTest(epoch=epoch), patch.dict(os.environ, {'SOURCE_DATE_EPOCH': epoch}):
+                with self.assertRaises(builder.IgvmBuildError):
+                    self.build()
+                self.assertFalse(self.workspace.exists())
+        self.run.assert_not_called()
+
     def test_application_requires_static_x64_elf(self) -> None:
         original = self.application.read_bytes()
         for data, message in (
