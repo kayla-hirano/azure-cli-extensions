@@ -1,33 +1,64 @@
 # Enclave isolation type support
 
-**Status:** Proposed, not implemented. This document describes the CLI changes
-required to support multiple isolation types using the decisions below. It does not
-claim that additional isolation types can run with today's packaged resources
-or runtime. See [CURRENT_DESIGN.md](CURRENT_DESIGN.md) for current behavior and
+**Status:** Proposed, not implemented. The current increment abstracts the CLI
+so shared workflows no longer assume SNP; SNP remains the only enabled isolation
+profile. New isolation backends and TDX RPC integration are future work.
+See [CURRENT_DESIGN.md](CURRENT_DESIGN.md) for current behavior and
 [NEW_DESIGN.md](NEW_DESIGN.md) for the other proposed command improvements.
 
 ## 1. Objective and scope
 
-Support multiple explicitly selected isolation types through shared create,
-setup, launch, status, destroy, and cleanup workflows rather than treating every
-guest as an SNP CVM. Introduce `--isolation-type` and an isolation profile
-registry that selects the required dependencies and supported CLI behavior.
+Abstract create, setup, launch, inspection, and teardown workflows behind a
+CLI-owned isolation profile registry. Move SNP-specific dependency requirements,
+image-generation settings, measurement/signing, host checks, RPC mapping, and
+readiness/evidence handling into an explicit SNP profile rather than assuming
+they apply to every guest. Keep shared lifecycle and ownership logic common.
 
-The external repository supplies **individual prebuilt artifacts**. CLI
-wheel-build tooling retrieves them and assembles one combined dependency bundle
-for inclusion in the extension. Create selects artifacts from that packaged
-bundle or a customer-provided `--dependency-bundle`; it does not compile them.
+Preserve today's SNP behavior using the default bundle already in the repository
+and compatible customer overrides. Introduce `--isolation-type` with an SNP
+default, but enable only the implemented SNP profile in this increment. Define
+extension points for other types without advertising them as runnable or
+returning fabricated results from placeholder handlers.
 
-Scope required implementation to the CLI repository: packaging and assembly,
-bundle consumption, registry and command behavior, protocol/client changes,
-state/profile contracts, documentation, and tests. External dependency builds,
-guest application changes, firmware/hypervisor implementation, and OpenVMM
-server implementation are prerequisites owned elsewhere, not work proposed
-here. Defining the CLI's input contract does not implement its external producer.
+The intended external source provides prebuilt dependencies, but its exact
+output layout and release/version mechanism are still being confirmed. For now,
+prepare retrieval from a placeholder repository and candidate bundle assembly
+as development-only build tooling. Continue packaging and using the currently
+provided dependency bundle; do not activate placeholder outputs as defaults.
+Create selects the active packaged bundle or a customer-provided
+`--dependency-bundle`; it does not fetch or compile dependencies.
 
-Include TDX RPC schema/client support as required CLI work. Working TDX guest
-launch additionally depends on a compatible server, generator, supplied
-artifacts, hardware, and nested host environment.
+Current implementation is CLI-only: registry/interfaces, dispatch through the
+existing SNP behavior, legacy bundle adaptation, placeholder retrieval/assembly,
+documentation, and regression tests. Preserve current RPC bindings, runtime
+pins, bundle schema, and resource defaults; no new protocol or backend is
+required to complete this refactor.
+
+TDX RPC schema/client changes, other isolation implementations, and external
+default activation are future work. Their later prerequisites include compatible
+artifacts, generator, server, hardware, and nested host environment. External
+dependency builds, guest changes, and firmware/hypervisor/OpenVMM server
+implementation remain owned elsewhere.
+
+### Prerequisites and related work from NEW_DESIGN.md
+
+The following references use proposal numbers in
+[NEW_DESIGN.md](NEW_DESIGN.md). They distinguish required integration contracts
+from improvements that do not block the current abstraction work. A proposal
+being referenced here does not add its implementation to this increment.
+
+| Proposal | Relationship to isolation support |
+| --- | --- |
+| 1. External dependency retrieval and default migration | Add placeholder retrieval/assembly after the shared interfaces are established. Keep the repository's provided bundle active; producer details do not block abstraction. Confirmation and validation gate future external-default activation. |
+| 2. Image-bound launch profile | Required before enabling new isolation types, not before refactoring SNP. Can ship separately for SNP first; later carry image hash, configuration/resources, and validated identity from create to launch/state. |
+| 3. Fixed instance location | Prerequisite for the proposed shared inventory, named diagnostics, and retained-state cleanup, not for extracting isolation handlers. Preserve current path behavior until that proposal ships; never introduce per-type roots or replace the host-wide lock. |
+| 4. Launch/destroy runtime cleanup | Preserve and regression-test existing owned-process, socket, lock, and evidence handling during refactoring. Broader teardown improvements can ship separately; verified teardown is required before enabling another backend. |
+| 5. Cleanup and destroy cleanup flag | Separate feature requiring proposal 3's fixed root and proposal 4's confirmed-shutdown contract. Keep removal isolation-independent when integrated; do not require a new cleanup command to finish abstraction. |
+| 6. Status | Separate inspection feature. When integrated, expose persisted isolation/configuration identity and distinguish recorded state from process observations; shared-inventory behavior depends on proposal 3. |
+| 7. Diagnostics logs | Separate troubleshooting feature. Keep filename-based log access isolation-independent when integrated; not a prerequisite for registry work. |
+| 8. Guest application path | Preserve existing application/init behavior now and the proposed installation/conflict rules when this independently deliverable option is integrated. |
+| 9. Optional build workspace | Preserve private staging and input/output separation. Making the workspace optional can ship independently and is not a registry prerequisite. |
+| 10. CLI core support floor | Validate refactoring against supported CLI/Python/dependency combinations. A revised minimum version is separate work; do not change it merely to introduce the registry. |
 
 ## 2. Current constraints
 
@@ -64,121 +95,143 @@ archive-or-directory `--dependency-bundle` override. An override replaces the
 packaged dependency source, not individual missing artifacts: never silently
 mix incomplete customer inputs with packaged defaults.
 
-A customer bundle may contain only the selected profile and its required
-artifacts. It need not contain every type packaged in the extension. Reject
-unknown types, unsupported configurations, missing required artifacts, or
-isolation mismatches before generation. Never substitute another isolation
-type or downgrade confidential execution.
+Only `snp` is selectable in this increment. Reject unknown, disabled, or placeholder types
+before dependency lookup, generation, setup changes, or RPC calls. Keep the
+existing schema-1 SNP bundle contract; move its required-artifact and
+configuration checks into the SNP implementation without weakening them.
 
-Target SNP, non-confidential guests, and TDX, with final non-SNP CLI identifiers
-documented in the implemented contract. Only advertise end-to-end support after
-the corresponding path is validated; a defined registry entry or protobuf
-message alone is insufficient.
+Future bundles may contain only a selected profile and its required artifacts,
+but their generalized schema is not needed for this refactor. Future targets
+include non-confidential guests and TDX; their identifiers and complete
+implementations remain deferred. Never substitute SNP for a requested but
+unsupported type or infer support from protobuf availability.
 
 ### Isolation profile registry versus bundle manifest
 
 | Component | Owned by | Responsibility |
 | --- | --- | --- |
 | Isolation profile registry | Reviewed CLI code | Identify supported types/configurations, required logical artifacts, configuration validation, generation/resource mapping, measurement/signing support, host requirements, RPC mapping, and readiness/evidence handling. |
-| Source release manifest | External artifact producer; validated by CLI build tooling | Identify the pinned release, individual artifacts, integrity values, and declared compatibility/provenance needed for assembly. |
-| Combined bundle manifest | CLI assembly helper; supplied by customers for overrides | Map profile artifact references to bundle-relative paths and hashes, preserving release identity and compatibility/provenance. Multiple profiles may reference shared artifacts. |
+| Existing dependency-bundle manifest | Repository bundle or compatible customer override | Preserve current indexed paths, hashes, and schema-1 SNP validation behind a bundle adapter. Do not require a manifest migration for abstraction. |
+| Candidate bundle index | Development-only CLI assembly helper | Index provisional output paths and hashes without changing active defaults. Generalized per-profile metadata and upstream output contracts remain future integration work. |
 
 Keep the registry small: explicit profile definitions and shared helpers with
 type-specific handlers where behavior genuinely differs. Do not duplicate the
-entire lifecycle per type or introduce a dynamic plugin framework.
+entire lifecycle per type or introduce a dynamic plugin framework. Shared
+orchestration must dispatch through these interfaces, not retain scattered
+SNP-specific branches. SNP requirements belong in its profile/handlers; shared
+code may still explicitly select SNP as the compatibility default.
 
 Bundle metadata selects only behavior already supported by the CLI. It must not
 load arbitrary Python modules or supply unchecked host command templates.
 Existing trust requirements for executing a bundled generator still apply;
 artifact hashes detect mismatches but do not authenticate a publisher.
 
-Initially each type can select one explicitly supported architecture/boot
-configuration. Record those identities and compatibility requirements without
-adding arbitrary architecture or boot-mode flags in this increment.
+For now, describe the existing SNP architecture/boot configuration explicitly
+in its profile. Do not add arbitrary architecture/boot-mode flags, speculative
+non-SNP requirements, or fake successful implementations for future types.
 
 ## 4. Dependency retrieval, assembly, and packaging
 
+**Interim scope:** implement retrieval from a placeholder repository and bundle
+its outputs using a provisional adapter/fixture layout. The actual dependency
+shape and release/version mechanism are unconfirmed. Do not prescribe a release
+manifest, version scheme, or release-selection policy yet; confirm these with
+the producer before production integration.
+
 ```text
-External release
-    individual prebuilt artifacts + release manifest
-    |
-    v
-CLI wheel-build helper under src/enclave/scripts
-    retrieve pinned artifacts -> validate hashes/compatibility
-    -> stage resources -> assemble combined archive and bundle manifest
-    |
-    v
-Extension wheel
-    CLI code + isolation registry + combined resource bundle
-    |
-    v
-create --isolation-type <type>
-    select packaged or customer bundle -> validate indexed artifacts
+Placeholder repository / controlled fixtures (development build only)
+    provisional prebuilt outputs
+    -> CLI retrieval/assembly helper
+    -> separate candidate bundle (not an active default)
+
+Currently provided dependency bundle
+    -> normal extension wheel (unchanged resource defaults)
+    -> installed CLI
+create --isolation-type snp
+    select provided packaged or customer bundle -> validate required artifacts
     -> resolve selected profile -> compose/generate image
-    -> optional supported signing -> image + image-bound launch profile
+    -> existing SNP measurement/signing -> image
+
+Image-bound launch-profile export/selection: separate NEW_DESIGN work
 ```
 
 Use a dedicated build helper under `src/enclave/scripts`, invoked by the actual
 wheel-build phase configured through `setup.py`. Keep `setup.py` as thin
-packaging orchestration. Do not download during module import, metadata
-inspection, customer wheel installation, or `az enclave setup`. Keep dependency
-assembly separate from protocol regeneration.
+packaging orchestration. Enable placeholder retrieval only through an explicit
+development build option; normal wheel builds must not contact the placeholder
+source. Do not download during module import, metadata inspection, customer
+wheel installation, create, or `az enclave setup`. Keep dependency assembly
+separate from protocol regeneration.
 
 The helper must:
 
-- Select an explicit release identity, not an unrecorded moving latest release.
-  Validate the source manifest and expected integrity values before packaging.
-- Retrieve prebuilt kernel/initrd/boot components, generators, and IGVM
-  configurations required by the supported profiles. Do not compile them.
-  Retrieve compatible application/init defaults as individual resources where
-  provided; keep their customer overrides independent of bundle selection.
+- Retrieve prebuilt outputs through a placeholder source adapter and map them
+  into a candidate combined bundle. Use controlled fixtures to exercise the
+  intended dependency categories without claiming the layout matches the
+  unconfirmed producer contract. Do not compile dependencies.
 - Stage in a private build directory, use deterministic archive paths/metadata,
   preserve executable permissions, and index shared artifacts once where
-  possible. Record source identity and build provenance accurately.
-- Validate the assembled archive and fail on missing, corrupt, incompatible,
-  or duplicate/conflicting artifacts. Never publish a partial wheel or disguise
-  retrieval failure by using unrelated stale local resources.
+  possible. Index bundle-relative paths and content hashes; these do not
+  establish an upstream release or authenticate its producer.
+- Validate the candidate archive against the provisional mapping and fail an
+  explicitly requested retrieval/assembly operation on missing, corrupt, or
+  conflicting outputs. Do not silently substitute the provided bundle to make
+  that operation appear successful.
+- Keep candidate outputs separate from the active provided bundle. Verify
+  ordinary wheel contents and no-override create remain unchanged.
 - Clean temporary staging and keep credentials out of archives, metadata, and
-  logs. Make release-selection and network errors actionable.
+  logs. Make source-access and assembly errors actionable.
 
-Version the bundle contract rather than reinterpreting schema-1 SNP metadata.
-Preserve legacy SNP bundle consumption through an explicit compatibility path.
-Required artifacts become profile-specific; not every profile requires
-`snp_bootshim`. Paths remain manifest-indexed rather than hard-coded filenames.
-Preserve path-containment, safe extraction, and integrity validation for all
-manifest-listed artifacts; only the required-artifact set varies by profile.
+Keep schema-1 SNP bundle consumption unchanged behind the adapter. The
+`snp_bootshim` requirement belongs to the SNP profile, not the shared resolver.
+Preserve manifest-indexed paths, containment, safe extraction, and integrity
+validation. Version any future generalized bundle contract separately rather
+than reinterpreting current metadata or requiring speculative producer fields.
 
-Building from the same pinned inputs should produce the same combined bundle.
-Define a verified local artifact-cache path for offline/repeatable builds if
-needed; it must use the same release and integrity checks, not a success-shaped
-fallback. The exact upstream release layout and assembly schema remain to be
-specified with the artifact producer.
+Confirm the producer's actual outputs, repository/access details, release/version
+mechanism, and any integrity/compatibility metadata later. Only after that
+agreement and validation should candidate assembly be adapted for production
+and replace the active defaults. Placeholder packaging does not make additional
+isolation types runnable; each still needs compatible supplied dependencies.
 
-## 5. Required CLI and command changes
+## 5. Required CLI abstraction changes
 
 | Area | Required change |
 | --- | --- |
-| Argument handling | Add `--isolation-type` to create and setup, defaulting to SNP. Validate against implemented profiles and document per-type restrictions. |
-| Create validation | Resolve the profile and bundle configuration, validate required artifacts and their compatibility, and reject mismatched effective IGVM isolation settings. Use profile-specific generator resource mappings rather than unconditional SNP resource names. |
-| Image composition | Reuse initrd composition for compatible configurations. Preserve the proposed application-path/custom-init rules and optional build workspace from `NEW_DESIGN.md`; reject unsupported combinations rather than ignoring options. |
-| Default application/init | Select compatible packaged defaults where supplied. Preserve explicit `--application` and `--init-script` precedence; overriding a bundle does not implicitly select a customer application. Custom workloads must still satisfy the supported guest/readiness contract. |
-| Debug settings | Apply guest-debug behavior only through the supported profile. Global `--debug` remains usable for CLI diagnostics; do not copy SNP debug fields into another type's configuration or silently enable unrelated guest features. |
-| Measurements | Parse generator outputs by type and expose explicitly typed results. Represent absence of a confidential measurement explicitly for configurations that do not produce one; do not fabricate SNP-shaped results. |
-| Signing | Retain `--signing-key` as SNP ID-block signing unless another mechanism is separately designed. Reject it for unsupported types. Signing failure must not publish an unsigned fallback. |
-| Setup | Check selected-type host/backend/runtime requirements and verify/install a compatible host runtime within setup's existing bounded responsibilities. Do not assume `/dev/mshv` existence proves support for every type, change kernels, reboot, or fetch image dependencies here. |
-| Launch | Read the type and supported configuration from the image-bound launch profile; validate compatibility and map to explicit RPC settings. Do not require repeating a potentially contradictory type selection for profiled images. |
+| Argument handling | Add `--isolation-type` to create and setup, defaulting to SNP. Allow only the enabled SNP profile; reject disabled/placeholder types before side effects. |
+| Create validation | Resolve the SNP profile and legacy bundle adapter. Move SNP artifact/configuration checks and generator mappings into that profile while preserving current validation/results. |
+| Image composition | Keep compatible rootfs/initrd composition shared; isolate type-specific generation inputs behind profile handlers. Preserve current application/init and workspace behavior; integrate NEW_DESIGN options separately. |
+| Default application/init | Resolve defaults through the profile using today's provided resources. Preserve explicit `--application` and `--init-script` precedence; overriding a bundle must not implicitly replace either. |
+| Debug settings | Move SNP guest-debug mapping into its handler. Preserve global `--debug` for CLI diagnostics; do not treat it as a generic guest security policy. |
+| Measurements | Isolate SNP measurement parsing behind a typed result interface while preserving existing command output. Leave other formats unimplemented, not fabricated as SNP results. |
+| Signing | Move existing SNP ID-block signing and capability checks behind the profile. Preserve `--signing-key` behavior and fail explicitly on unsupported operations or signing errors; never publish an unsigned fallback. |
+| Setup | Move SNP-specific host/backend/runtime checks into its profile while retaining shared setup orchestration and bounded installation behavior. Do not change kernels, reboot, or fetch image dependencies. |
+| Launch | Route the current SNP configuration and RPC request mapping through the SNP handler without changing its values or RPC schema. Image-bound profile selection is a separate integration; once available, dispatch using its validated identity rather than current defaults. |
 | Worker/supervisor | Keep process ownership, serial collection, logs, locks, and child reaping shared. Pass only validated configuration needed by the runtime; do not move CLI validation into arbitrary bundle-driven worker behavior. |
-| Readiness/evidence | Separate application readiness from type-specific evidence collection. Non-confidential guests must not need SNP evidence; other confidential profiles use their own supported formats. Keep evidence collection distinct from cryptographic verification. |
-| Instance state/status | Persist isolation/configuration identity and readiness/evidence outcome. Include the type in named status details while preserving the agreed compact default list. Keep timestamps and process-liveness checks independent of isolation. |
-| Destroy | Preserve shared RPC shutdown and owned-process recovery. Use persisted validated configuration only where shutdown needs type-specific handling; do not infer a stopped instance's type from current packaged defaults. |
-| Cleanup | Remain isolation-independent and reuse the proposed confirmation, dry-run, and shutdown checks. Remove only retained named-instance state, preserving external images and inputs. |
+| Readiness/evidence | Separate shared readiness orchestration from the SNP exchange/report handler while preserving today's readiness requirements. Define extension points for future evidence formats; collection is not cryptographic verification. |
+| Instance state/status | Keep ownership and liveness handling shared. Record resolved type/configuration identity for new records without invalidating existing SNP records; preserve existing fields and command output. Integrate the proposed status command separately. |
+| Destroy | Preserve shared RPC shutdown and owned-process recovery. Resolve new records through their persisted identity; treat valid legacy records explicitly as SNP, not as whichever profile later becomes the default. Reject corrupt/unknown identities. |
+| Cleanup | Keep retained-state removal independent of guest isolation. If/when NEW_DESIGN cleanup is integrated, reuse its confirmation, dry-run, and shutdown checks rather than creating a per-type implementation. |
 
-The fixed runtime state root and single-runtime host guard proposed in
-`NEW_DESIGN.md` remain unchanged. The optional create workspace is separate from
-runtime state. Do not add a per-type state root or permit concurrent types as
-an incidental effect of this work.
+Preserve current state-path behavior and the single-runtime host guard during
+refactoring. When NEW_DESIGN's fixed-root and optional-workspace changes ship,
+reuse their contracts; do not require them to land first. Never introduce a
+per-type state root or permit concurrent runtimes as an incidental effect.
 
 ### Image-bound launch profile and backward compatibility
+
+This is a separate delivery/integration contract, not an acceptance requirement
+for the current abstraction increment. Keep today's create/launch behavior
+until that proposal is implemented. Before any new isolation type is enabled,
+integrate the contract below.
+
+The profile contract can ship independently for today's SNP create/launch
+workflow before registry generalization or TDX integration. Multi-isolation
+support then reuses that contract with supported type-specific validation and
+RPC mapping. See [NEW_DESIGN.md](NEW_DESIGN.md) for the detailed parameter and
+selection rules: launch's optional `--launch-profile <path>` selects an explicit
+profile; otherwise launch discovers `<image-filename>.launch.json` beside the
+image. An explicit selection takes precedence and must not silently fall back.
 
 Create must export a versioned profile containing isolation identity,
 architecture, boot/configuration identity, supported resource/device settings,
@@ -195,9 +248,16 @@ filename or guess isolation from absent metadata. Older instance records need
 an explicit legacy-SNP interpretation where supported, with unknown/corrupt
 state reported rather than silently relabeled.
 
-## 6. TDX RPC schema and runtime integration
+## 6. Future work: TDX RPC schema and runtime integration
 
-Treat TDX protocol support as an explicit dependency of TDX launch:
+TDX integration is out of scope for the current abstraction increment. Keep
+the current schema, generated bindings, protocol pins, and SNP runtime mapping
+unchanged; extracting that mapping into an SNP handler is sufficient now.
+The interfaces must permit a later TDX implementation without assuming SNP
+request fields or evidence formats in shared code.
+
+When TDX work is scheduled, treat protocol support as an explicit dependency
+of TDX launch:
 
 1. Obtain the authoritative TDX-capable OpenVMM service contract and establish
    the runtime version/capabilities that implement it. Do not invent protobuf
@@ -226,49 +286,58 @@ policy; do not merely relax package checks to accept unverified runtimes.
 
 | Issue | Impact and handling |
 | --- | --- |
-| External support unavailable | CLI changes cannot supply missing nested TDX capabilities, guest components, or server implementation. Gate claims of support on verified external prerequisites and actual target-host boot tests. |
-| Isolation/configuration drift | Requested type, bundle profile, effective IGVM JSON, launch profile, and instance state must agree. Validate each boundary and never downgrade isolation to make a launch succeed. |
-| Readiness coupling | The current sample requires SNP evidence. Compatible supplied sample resources and a type-aware CLI contract are prerequisites; changing dependency lookup alone is insufficient. |
-| Larger wheels | Packaging every profile can increase download, installation, and disk usage. Measure wheel size and host architecture/tool compatibility; deduplicate shared artifacts without obscuring ownership or hashes. |
-| Build network and trust | Private release access, moving assets, and corrupt downloads can undermine reliable builds. Pin releases, verify artifacts, keep credentials out of outputs, and fail before wheel publication. |
-| Compatibility migration | New bundle/profile/state schemas and runtime upgrades can break existing SNP usage. Maintain explicit legacy paths and regression coverage rather than changing old field meanings. |
+| Abstraction regression | Moving SNP logic must preserve image composition, measurements/signing, request serialization, readiness, and teardown. Test shared dispatch as well as the concrete SNP handlers. |
+| External support unavailable | Missing TDX/server/artifact capabilities do not block abstraction. They do block enabling those future backends; do not advertise placeholder types as supported. |
+| Isolation/configuration drift | Resolve an explicit SNP identity now and persist it for new records. Validate future image/profile/state boundaries when integrated; never downgrade an unsupported selection. |
+| Readiness coupling | Keep the sample's SNP exchange/evidence rules in the SNP handler, not shared orchestration. Future workloads/types require their own compatible implementation and resources. |
+| Speculative interfaces | Define boundaries around actual SNP responsibilities rather than guessing future dependency layouts or TDX protocol fields. Avoid unused plugin systems and duplicated lifecycles. |
+| Unconfirmed producer contract | Placeholder retrieval is not production integration. Confirm dependency layout, access, release/version handling, and integrity metadata before replacing provided defaults. Keep credentials out of outputs and fail explicitly requested retrieval/assembly operations on errors. |
+| Compatibility migration | Preserve the current bundle schema, runtime pins, output, and legacy state interpretation. Keep future profile/schema migrations separate and regression-tested. |
 | Signing/debug ambiguity | SNP-specific options do not automatically generalize. Validate support explicitly while preserving CLI logging and avoiding accidental guest security-policy changes. |
-| Reproducibility | Resource retrieval and per-profile generation introduce new input/version boundaries. Record them and compare controlled repeated builds; characterize signed outputs separately. |
+| Reproducibility | Compare candidate assembly using identical fixture inputs. Production input/version tracking remains pending producer agreement; characterize signed outputs separately. |
 
 ## 8. Suggested implementation sequence and acceptance criteria
 
-1. **Agree on contracts and prerequisites.** Specify supported type/configuration
-   combinations, registry entries, release artifact contract, bundle schema,
-   launch profile, measurement results, and readiness/evidence behavior.
-   Confirm TDX generator/server/host availability; flag missing external inputs.
-2. **Implement resource assembly.** Add the wheel-build helper and thin
-   packaging integration. Test pinned individual-artifact retrieval, missing/
-   corrupt resources, safe staging, deterministic assembly, and wheel contents.
-   Verify metadata inspection and customer installation do not trigger downloads.
-3. **Introduce the registry while preserving SNP.** Route existing SNP create,
-   setup, launch, measurements, and readiness through shared/profile-specific
-   helpers. Existing defaults, overrides, and legacy bundles must still work.
-4. **Generalize create and image identity.** Add isolation selection,
-   profile-specific dependencies/options, launch-profile export, typed results,
-   and compatibility validation. Test partial customer bundles containing one
-   complete profile and ensure missing inputs never pull from packaged defaults.
-5. **Add non-SNP runtime paths, including TDX RPC work.** Update the authoritative
-   protocol pin/bindings and runtime mapping together, implement preflight and
-   readiness/evidence handling, and persist the selected identity for inspection
-   and teardown. Keep unsupported combinations explicit.
-6. **Validate integrated behavior.** Test each supported type's default/custom
-   resources, malformed/mismatched profiles, unsupported signing, debug handling,
-   old records, missing host capabilities, failures/timeouts, status, destroy,
-   cleanup, and retained evidence. Verify protocol checks and existing linters/
-   targeted tests using repository-documented commands.
-7. **Gate release on real execution.** On compatible hosts, verify image
-   creation, VM boot, readiness, correct evidence labeling, shutdown, and
-   cleanup for each advertised configuration. Record the tested hardware,
-   generator, resources, runtime, and CLI versions. Mocks and schema checks
-   alone do not establish nested isolation support.
+1. **Abstract shared workflows first, preserving SNP.** Identify the existing
+   SNP responsibilities and define the smallest registry/handler interfaces
+   needed for them. Route create, setup, launch, inspection/state handling,
+   measurements/signing, readiness, and teardown through shared orchestration
+   plus the concrete SNP implementation. Use the repository's current default
+   bundle and compatible overrides. Preserve existing behavior; do not wait
+   for external artifact details, launch-profile delivery, or TDX schema work.
+2. **Add explicit selection and compatibility handling.** Wire
+   `--isolation-type` into create/setup with default `snp` and only SNP enabled.
+   Record resolved identity for new instances and interpret valid legacy SNP
+   records explicitly. Test rejection of unknown/placeholder selections before
+   side effects and preservation of the existing bundle/CLI output contracts.
+3. **Prepare placeholder retrieval and assembly.** Add the development-only
+   wheel-build helper and thin packaging integration. Test fixture retrieval,
+   missing/corrupt outputs, safe staging, and candidate assembly. Verify normal
+   wheel builds retain the provided bundle without contacting the placeholder
+   source, and installed commands never fetch dependencies.
+4. **Validate the abstraction increment.** Test shared dispatch, SNP handlers,
+   default/customer bundles, independent application/init overrides, debug
+   mapping, measurements/signing, old/new records, host checks, failure paths,
+   process ownership, teardown, and retained evidence. Verify existing protocol
+   checks and repository-documented linters/targeted tests. Use test doubles to
+   exercise handler boundaries, not to claim real non-SNP support.
+5. **Verify SNP end to end before declaring the refactor complete.** On a
+   supported SNP host, confirm image creation, VM boot, readiness/evidence,
+   shutdown, and existing cleanup behavior using unchanged default resources
+   and runtime. Record the tested environment; mocked dispatch alone does not
+   prove preservation of the current working path.
 
-Before implementation, resolve the upstream release location/manifest format,
-exact non-SNP identifiers and boot-component requirements, compatible sample
-resources, authoritative TDX protocol/runtime version, and legacy image-profile
-production guidance. These are integration decisions, not assumed capabilities
-of today's extension.
+Current completion means shared workflows no longer encode SNP-specific guest
+behavior, the enabled SNP profile preserves that behavior, unsupported types
+fail explicitly, and placeholder assembly cannot replace active defaults.
+It does not require TDX/non-confidential boot, a new bundle schema, external
+release integration, or delivery of the separate NEW_DESIGN features.
+
+Before activating external defaults, confirm the upstream dependency layout,
+source/access details, release/version mechanism, and integrity/compatibility
+metadata. These decisions do not block placeholder retrieval/assembly work.
+In a future increment, before advertising new isolation support, resolve exact
+non-SNP identifiers and boot-component requirements, compatible sample resources,
+the authoritative TDX protocol/runtime version, the required NEW_DESIGN contracts above, and
+customer image-profile production guidance. These are integration decisions,
+not assumed capabilities of today's extension.
