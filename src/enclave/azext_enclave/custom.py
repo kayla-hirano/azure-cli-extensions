@@ -44,11 +44,11 @@ def create_enclave(cmd: AzCliCommand, workspace: str, output_file: str,
         result = build_igvm(
             dependency_bundle=bundle,
             application=Path(application).expanduser() if application is not None else DEFAULT_APPLICATION,
-            init_script=(Path(init_script) if init_script is not None
+            init_script=(Path(init_script).expanduser() if init_script is not None
                          else DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'),
-            workspace=Path(workspace),
-            output=Path(output_file),
-            signing_key=Path(signing_key) if signing_key is not None else None,
+            workspace=Path(workspace).expanduser(),
+            output=Path(output_file).expanduser(),
+            signing_key=Path(signing_key).expanduser() if signing_key is not None else None,
             debug=keep_intermediates,
             enable_debug='--debug' in cmd.cli_ctx.data['safe_params'],
             logger=logger)

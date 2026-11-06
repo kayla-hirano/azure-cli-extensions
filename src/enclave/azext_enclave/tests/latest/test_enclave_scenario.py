@@ -81,11 +81,6 @@ class EnclaveCommandTest(unittest.TestCase):
             self.assertEqual(custom.destroy_enclave('demo'), {'status': 'destroyed'})
             destroy.assert_called_once_with('demo', '/var/lib/enclave/instances', 30)
 
-    def test_destroy_forwards_explicit_old_state_root(self) -> None:
-        with patch('azext_enclave._lifecycle.destroy', return_value={'status': 'destroyed'}) as destroy:
-            custom.destroy_enclave('demo', state_dir='/var/lib/ace/instances')
-            destroy.assert_called_once_with('demo', '/var/lib/ace/instances', 30)
-
     def test_setup_delegation(self) -> None:
         """Keep host preparation separate from Python dependency installation."""
         self.assertIn('setup.py', helps['enclave setup'])

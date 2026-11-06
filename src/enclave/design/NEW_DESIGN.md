@@ -1,340 +1,308 @@
 # Enclave extension improvements
 
-This document tracks proposed improvements to the current extension, grouped by
-related behavior and shared prerequisites. See [CURRENT_DESIGN.md](CURRENT_DESIGN.md)
-for the current implementation and command reference; proposals below are not
-implemented behavior.
+| # | Proposed change | Status |
+| --- | --- | --- |
+| 1 | External dependency retrieval and default migration | Not started |
+| 2 | Create-time configuration with automatic launch settings | Not started |
+| 3 | Fixed instance location | Not started |
+| 4 | Launch/destroy runtime cleanup | Not started |
+| 5 | Destroy with automatic cleanup and optional log retention | Not started |
+| 6 | `az enclave status`, including IGVM measurement | Not started |
+| 7 | `az enclave diagnostics logs` listing and viewing | Not started |
+| 8 | Guest application command line (`--app-cmd-line`) | Not started |
+| 9 | Optional build workspace and intermediate-file visibility | Not started |
+| 10 | CLI core support floor | Not started |
 
-The isolation profile registry, type-specific behavior, and TDX RPC work are
-specified in [ISOLATION_TYPES_DESIGN.md](ISOLATION_TYPES_DESIGN.md). The resource
-assembly and launch-profile proposals below use that shared design rather than
-assuming every dependency or runtime setting is SNP-specific.
+These proposals are not implemented. See
+[CURRENT_DESIGN.md](CURRENT_DESIGN.md) for implemented behavior and
+[ISOLATION_TYPES_DESIGN.md](ISOLATION_TYPES_DESIGN.md) for the shared isolation
+registry and TDX work. This document supersedes that design's placeholder
+retrieval, launch sidecar, and opt-in cleanup proposals; update those references
+before implementation.
 
-## Dependency delivery and image-bound launch configuration
+## Dependency delivery and parameterized launch configuration
 
 ### 1. Proposed change: external dependency retrieval and default migration
 
 #### Purpose and ownership
 
-Prepare CLI build-time retrieval from a placeholder external repository and
-bundle its outputs while the producer's dependency layout is being confirmed.
-Keep the currently provided dependency bundle as the packaged and create-time
-default; placeholder outputs must not replace it.
-
-The eventual input is expected to be prebuilt dependencies, not components
-compiled by the CLI. Their exact shape, repository location, and release/version
-contract remain unconfirmed. See
-[ISOLATION_TYPES_DESIGN.md](ISOLATION_TYPES_DESIGN.md) for the shared isolation
-and bundle-consumption design; confirm producer details before activating
-external defaults.
+Defer retrieval/assembly and default migration until the producer confirms how
+prebuilt dependencies will be delivered: layout, repository/access, versions,
+and compatibility/integrity metadata. The CLI will not compile dependencies.
+Keep the current packaged bundle and create defaults meanwhile.
 
 #### Wheel construction and migration
 
-Add a dedicated retrieval/assembly helper under `src/enclave/scripts` and invoke
-it in the actual wheel-build phase through thin `setup.py` orchestration.
-For now, make this a development-only, explicitly enabled build path using a
-placeholder source and provisional output mapping, tested with controlled
-fixtures. Retrieve the supplied outputs, stage them safely, and assemble a
-candidate archive with indexed paths and content hashes. Keep it as a separate
-build output, not the bundle selected by installed create commands.
+Provisional direction after agreement: a helper under `src/enclave/scripts`,
+called during wheel construction through thin `setup.py` orchestration,
+assembles a candidate bundle with indexed paths/hashes in private staging.
+Preserve source inputs and surface retrieval/assembly failures; do not silently
+substitute the old bundle. Switch defaults only after compatibility and
+end-to-end validation, not fixture-only assembly.
 
-Normal wheel builds continue packaging the currently provided dependency
-bundle and application/init defaults, without contacting the placeholder source.
-Do not download during metadata inspection, customer wheel installation, create,
-or `az enclave setup`. Keep staging private and clean it without modifying
-source inputs. An explicitly requested retrieval/assembly failure must fail that
-build operation visibly, not be disguised as successful external integration.
-
-Defer switching defaults until the producer's inputs and release/version
-mechanism are confirmed and the resulting bundle passes compatibility and
-end-to-end validation. Shared artifacts and profile-specific requirements remain
-part of the CLI bundle design, not an assumed upstream publishing contract.
+Until migration, normal builds package existing dependencies/application/init
+without external requests. Never download during metadata inspection, customer
+installation, create, or setup. Shared/profile-specific bundle requirements are
+CLI contracts, not assumed producer publishing requirements.
 
 #### Customer overrides and validation
 
-Preserve `--dependency-bundle`, `--application`, and `--init-script`, including
-the application-path/custom-init rules in proposal 8. Explicit inputs override
-their corresponding defaults independently. For the selected isolation type,
-a customer dependency bundle must supply all required artifacts; it may omit
-unselected profiles but must not silently borrow missing resources from the
-packaged bundle. A custom bundle does not implicitly select a customer
-application or init script.
+Preserve independent `--dependency-bundle`, `--application`, and `--init-script`
+overrides and proposal 8's conflict rules. A customer bundle must contain all
+artifacts for the selected isolation type; it may omit other profiles but cannot
+borrow missing artifacts from packaged defaults or implicitly replace app/init.
 
-Test placeholder retrieval and failures, indexed paths/content hashes, safe
-staging, candidate assembly, and separation from the active packaged bundle.
-Verify normal wheel builds make no placeholder requests and no-override create
-still uses the currently provided bundle. Preserve legacy SNP/customer bundle
-handling and independent application/init overrides. Confirm the upstream layout,
-release/version mechanism, and any source metadata later; do not treat fixture
-assembly as proof of production compatibility.
+Validate retrieval failures, hashes/paths, safe staging, candidate separation,
+legacy SNP/customer inputs, unchanged default create, and no external requests
+from ordinary builds.
 
-### 2. Proposed change: image-bound launch profile
+### 2. Proposed change: create-time configuration with automatic launch settings
 
-#### Purpose and contents
+#### Purpose and ownership
 
-Keep launch configuration consistent with the exact image create produced,
-rather than applying fixed SNP resources/devices to every image. Export a
-versioned launch-profile JSON file alongside the final IGVM, derived from the
-effective generation configuration after create's overrides, not a later copy
-of the bundle JSON.
+Set CPU count, guest memory, and isolation during create; launch reads those
+settings without duplicate flags. Publish only the IGVM, not a launch-profile
+JSON.
 
-| Profile information | Use at launch |
-| --- | --- |
-| Schema version | Reject unsupported formats instead of guessing field meanings. |
-| Final IGVM SHA-256 | Detect mismatched image/profile pairs after any optional signing. This is not publisher authentication or attestation verification. |
-| Isolation type, architecture, and supported boot/configuration identity | Select a supported isolation-registry entry and verify generator/runtime compatibility. Do not infer identity from current defaults. |
-| Virtual CPU count and guest memory | Configure supported resources with exact unit conversions, limits, and alignment checks. |
-| Supported device layout | Map measured PCIe segment/bus ranges and MMIO windows where applicable. Validate ECAM/runtime support; reject unsupported settings rather than silently dropping them. |
+Package one versioned isolation manifest JSON per type with the extension,
+sharing defaults and supported settings between create and launch. This is
+extension metadata, not a per-image file or executable plugin.
+Store selected values in supported IGVM fields or agreed embedded metadata.
+Launch validates them, configures the runtime, and saves effective settings in
+instance state; it does not resize or rewrite the image.
 
-Keep host paths, serial/vsock sockets, process ownership, and executable
-arguments generated by trusted CLI logic. The profile is not an arbitrary
-OpenVMM configuration or a mechanism to execute bundle-defined host commands.
-Image-only settings must not be blindly copied into RPC fields.
+#### Property classification and validation
+
+Today `_rpc.py` fixes SNP/Linux-direct boot, one CPU, 160 MiB, and PCIe/vsock
+layout; create overrides bundle debug policy, not CPU/memory. Audit generator
+fields, limits, and measured-versus-runtime semantics before adding parameters.
+
+| Property | Proposed classification | Configuration and constraints |
+| --- | --- | --- |
+| Isolation type (`Snp`) | Fixed within a selected profile | `--isolation-type snp` selects the registry mapping; only SNP is currently enabled. Never reinterpret an image as another type. |
+| Architecture/boot personality | Fixed per supported configuration | Today's combination is x86-64/Linux-direct, not a universal SNP requirement. Reject unsupported combinations. |
+| `processor_count` | User build preference | Positive integer within validated limits; verify exact-count versus range semantics. |
+| Guest memory | User build preference | Verify generator support, conversions, limits, alignment, and address-map conflicts. |
+| PCIe buses/segments, MMIO, ECAM, device topology | Fixed per supported image/device layout | Keep measured layout and RPC mapping together; no raw topology flags or assumption that all SNP images share a layout. |
+| `disable_vmbus`, `disable_hv`, COM1/vsock wiring | CLI-owned runtime configuration | Preserve required devices/settings; separate measured declarations from generated host socket paths. |
+| Guest debug policy/signing | Build-time security choices | Preserve behavior; no launch override or silent image regeneration. |
+| Application/init/command line | User build inputs | Apply existing overrides and proposal 8; rebuild and remeasure rather than substitute at launch. |
+| Name, host paths, sockets, logs, ownership | Per-run host state | Generate through trusted CLI logic; no image-embedded instance paths or bundle-defined host commands. |
+
+Verify classifications, CPU/memory support, and measured-versus-runtime limits
+with dependency/runtime owners. Validate isolation manifest schemas and keep
+defaults in that single source.
 
 #### Parameters and examples
 
 | Parameter | Description |
 | --- | --- |
-| `launch --launch-profile <path>` | New optional path to the image-bound launch-profile JSON file on L1. Overrides adjacent-file discovery, not individual profile settings or image identity. |
-| `launch --igvm <path>` | Existing required image path. Its final SHA-256 must match the selected profile. |
+| `create --processor-count <count>` | Optional CPU count; current SNP default 1. Apply before measurement/signing. |
+| `create --memory-mb <MiB>` | Optional guest memory in MiB; current SNP default 160. |
+| `create --isolation-type <type>` | Registry selection, default `snp`; reject unimplemented types. |
+| `launch --igvm <path>` | Required image path; read saved settings automatically, without resource/isolation overrides or companion JSON. |
 
 ```bash
-# Automatically discover ./custom.igvm.launch.json
-sudo az enclave launch --name demo-1 --igvm ./custom.igvm
+# Omitted create resources use the supported SNP defaults
+az enclave create --output-file ./default.igvm
+sudo az enclave launch --name demo-1 --igvm ./default.igvm
 
-# Use a profile stored elsewhere or under a different filename
-sudo az enclave launch --name demo-1 --igvm ./custom.igvm \
-    --launch-profile ./profiles/custom-launch.json
+# Illustrative non-default resources, once validated as supported
+az enclave create --processor-count 2 --memory-mb 256 \
+    --output-file ./custom.igvm
+sudo az enclave launch --name demo-2 --igvm ./custom.igvm
 ```
 
-#### Selection, compatibility, and validation
+#### Configuration flow and open validation questions
 
-Create writes `<image-filename>.launch.json` adjacent to the image, for example
-`custom.igvm.launch.json`, and publishes the pair consistently. If
-`--launch-profile` is supplied, use only that file; otherwise discover the
-adjacent file. An explicitly selected missing/unreadable profile or an invalid
-selected/discovered profile is an error, not permission to try another profile
-or use the legacy fallback.
+Create resolves defaults/overrides once in a private image-generation
+configuration. Embed effective settings before measurement and optional signing
+as required by the format. Preserve source inputs and no-overwrite publication;
+normal output remains the final image path and measurements (proposal 9).
 
-#### Crash-safe publication
+Launch reads embedded settings, validates resource/device/host compatibility,
+and maps them to RPC. Do not infer settings from filenames, workspaces, or local
+caches. Missing fields use packaged isolation manifest defaults; warn with every
+substituted name/value, isolation type, and manifest version. For example:
 
-Preserve create's no-overwrite guarantee for both the image and adjacent profile.
-Serialize publication for the destination pair, recheck both destinations before
-publishing, and reject existing files or symlinks at either path. Stage and
-validate both outputs on the destination filesystem, including the final image
-hash after signing. Publish the profile first and make it durable before
-publishing the image; never expose a newly published image without its profile
-and thereby accidentally enable legacy fallback. Report success only after both
-outputs are durable. Two separate file publications are not an atomic pair.
+```text
+IGVM settings missing; using packaged snp manifest defaults (version <version>):
+processor_count=1, memory_mib=160
+```
 
-On failure, remove only staging files and published outputs demonstrably owned
-by that operation, without overwriting or deleting another caller's files.
-An interrupted operation may leave an orphan profile; report destination
-collisions explicitly and document how to inspect and remove that orphan before
-retrying. Never silently adopt an existing profile or image. Test failures and
-interruption between publication steps, durability ordering, existing profile-only
-and image-only destinations, concurrent publishers, rollback failure, and retry.
+Warn only for fields actually defaulted. Missing isolation identity uses the
+SNP compatibility default, adding `isolation_type=snp` to the warning.
+Missing fields do not cause rejection; malformed, unsupported, or contradictory
+values still fail validation. Defaults do not prove the image's intended
+configuration; surface runtime/boot failures.
 
-#### Validation guarantees and future work
+**Technical prerequisite:** identify IGVM fields that preserve selected values,
+not runtime-input locations or bounds. The
+[IGVM parameter specification](https://docs.rs/igvm_defs/latest/igvm_defs/struct.IGVM_VHS_PARAMETER.html)
+defines loader-supplied information, not necessarily stored CPU/memory choices.
+If insufficient, agree versioned embedded metadata and a validated reader with
+generator/runtime owners. Do not append arbitrary data or assume current tool
+support. Defaults cannot recover lost custom values.
 
-The image hash detects pairing with different image bytes; it does not prove
-that editable profile fields describe the image's measured configuration.
-Current validation checks profile structure, supported values, compatibility,
-and image hash, while relying on trusted profile production for correspondence
-with generation settings. Do not describe those checks as independently proving
-that CPU, memory, or device declarations match the image.
+Save identity, effective settings, image/default provenance, and final image
+hash for status. A hash does not prove configuration, publisher authenticity,
+or attestation.
 
-Future work must identify which configuration fields can be independently
-validated against the IGVM and which require authenticated producer metadata
-or another explicit trust contract. Define those guarantees and test edited
-profile fields with an unchanged image hash before claiming stronger binding.
-This is separate from publisher authentication and attestation verification.
-
-#### Launch validation
-
-Use the profile's isolation identity rather than asking users to repeat a
-potentially contradictory launch selection. Validate the image hash, supported
-configuration, resource/device settings, and host/runtime compatibility before
-issuing VM creation requests. Persist the validated identity in instance state
-for named status and any type-specific teardown handling.
-
-Only when no explicit profile was requested and no adjacent profile exists,
-retain the documented legacy SNP configuration with a visible warning,
-including its one CPU and 160 MiB settings. Do not use this path for new
-isolation types or downgrade to another type. New isolation types, including
-customer-built images, require an image-bound profile under the supported
-contract; document how customers can produce one.
-
-Test explicit-path precedence, automatic discovery, missing/unreadable profiles,
-legacy fallback, final-image hash mismatches,
-malformed/unsupported schemas, type/configuration mismatches, exact conversions,
-bus/MMIO ranges and overlaps, ECAM compatibility, and actual guest boot.
-Use shared mapping with type-specific validation as required by the isolation
-registry. Protocol/schema support alone is not evidence that a guest can boot.
+Validate defaults/overrides, limits/conversions, device-layout compatibility,
+embedded-configuration round trips, generation/RPC agreement, malformed or
+unsupported metadata, partial/all missing settings and exact fallback warnings,
+shared manifest defaults/schema/version validation, legacy/customer images,
+signing/publication failures, and actual non-default guest boot. RPC schema
+support alone does not prove boot compatibility.
 
 ## Instance state, shutdown, and cleanup
 
 ### 3. Proposed change: fixed instance location
 
 Use `/var/lib/enclave/instances` as the sole, non-overridable instance root.
-Every managed enclave uses `/var/lib/enclave/instances/<name>`, so names are
-unique across the host's managed inventory and status can discover all retained
-instances in one place. Do not introduce an equivalent environment-variable or
-configuration override.
+Instances use `<root>/<name>` with host-wide unique names and a shared inventory
+of active, failed, and incompletely destroyed instances. No equivalent
+environment-variable or configuration override.
 
 #### Affected commands and components
 
 | Command/component | Required change |
 | --- | --- |
-| `az enclave launch` | Remove `--state-dir`; always create instance records, runtime endpoints, and logs under the fixed root. Preserve name validation and refusal to overwrite retained instances. |
-| `az enclave destroy` | Remove `--state-dir`; resolve `--name` under the fixed root. Preserve evidence by default; `--cleanup` removes only the validated named instance after confirmed shutdown. |
+| `az enclave launch` | Remove `--state-dir`; create records, endpoints, and active logs under the fixed root. Preserve name validation and no-overwrite checks. |
+| `az enclave destroy` | Remove `--state-dir`; resolve `--name` under the fixed root. Proposal 5 defines archival/removal. |
 
 #### Ownership, compatibility, and storage
 
-Keep the root private and root-owned, validate paths without following symlinks,
-and retain full process-identity checks. Retain the host-wide runtime lock:
-a shared directory alone does not prevent concurrent launches. Cross-root
-discovery and a host-wide owner record for locating custom roots are no longer
-required; status can inspect the shared inventory to identify the blocker.
+Keep root-owned/private directories, no-symlink path validation, full process
+identities, and the host-wide runtime lock; a shared root alone cannot prevent
+concurrent launches. Custom-root discovery/owner records are unnecessary.
+Proposal 5's separate log archives do not reserve names.
 
 ### 4. Proposed change: launch/destroy runtime cleanup
 
 #### Purpose and boundary
 
-Verify and close gaps in runtime teardown so owned processes or stale sockets
-do not block later launches. This concerns releasing runtime resources, not
-deleting retained evidence: proposal 5 separately defines `cleanup`,
-`destroy --cleanup`, confirmation, and dry-run behavior.
+Release owned processes/sockets so later launches are not blocked. Proposal 5
+owns post-shutdown archival/removal; no standalone cleanup command or
+`destroy --cleanup` flag.
 
 #### Required behavior and validation
 
-Preserve shared supervision and ownership checks across isolation types.
-Prefer RPC teardown/server shutdown, confirm exit, and apply only the existing
-bounded owned-process recovery where appropriate. Unconfirmed destroy RPC
-failures remain retryable; do not turn an error into forced shutdown or a
-success-shaped result.
+Share supervision/ownership checks across types. Prefer RPC shutdown, confirm
+exit, and retain bounded owned-process recovery; never signal reused/unowned
+PIDs or force shutdown after an unconfirmed destroy RPC failure. Reap children,
+remove only known sockets safely, and hold the host guard until its owners exit.
 
-Verify launch success, failed/timed-out creation, guest-readiness failure,
-worker/server exits, interrupted teardown, and repeated destroy. Confirm the
-supervisor reaps its child, recovery never signals a reused/unowned PID, known
-sockets are removed safely, and the host guard remains held until its owning
-processes exit. Report cleanup errors and preserve logs, records, timestamps,
-and isolation identity needed for status and diagnosis.
+Unconfirmed shutdown preserves state/logs for retry. Once runtime/log writers
+exit, finalize through proposal 5, including failed launches. Surface cleanup
+errors and retain diagnostic state/timestamps/identity until finalization;
+status must distinguish stopped from removal-complete, and existing directories
+still reserve names.
 
-Default destroy must retain evidence and the occupied name. With explicit
-`--cleanup`, require confirmed shutdown before entering proposal 5's shared
-retained-state removal path. Dry-run is available only on standalone cleanup
-and must not stop processes or remove files.
-Test concurrent lifecycle operations and partial failures so status distinguishes
-confirmed shutdown from incomplete cleanup and never reports a retained
-instance directory as a free name.
+Validate successful/failed/timed-out launch, readiness failure, process exits,
+interrupted/repeated destroy, ownership/socket/lock handling, and concurrent or
+partially failed lifecycle operations.
 
-### 5. Proposed change: `az enclave cleanup` and `destroy --cleanup`
+### 5. Proposed change: destroy with automatic cleanup and retained logs
 
-#### Purpose
+#### Purpose and command behavior
 
-Remove one or all confirmed-stopped enclaves' retained records, logs, and
-evidence to release their names. Keep ordinary destroy's existing behavior:
-stop the runtime and remove sockets, but retain diagnostic state.
+`az enclave destroy --name <name>` stops the enclave, archives logs by default,
+and removes instance data to release its name. Historical logs remain separate
+from managed inventory; preserve external IGVMs/inputs and shared locks.
 
-#### Parameters
-
-| Command/parameter | Description |
+| Parameter | Description |
 | --- | --- |
-| `cleanup --name <name>` | Optional. Select one stopped instance under the fixed root; omit to select all instances confirmed not running. |
-| `cleanup --dry-run` | Preview targets, skips, blockers, and suggested commands without changing records or deleting files.|
-| `destroy --cleanup` | New opt-in flag: confirm shutdown, then remove retained state through the same cleanup implementation. |
-| `cleanup --yes`, `destroy --cleanup --yes` | Approve the computed shutdown/deletion plan without prompting; never bypass validation or shutdown checks. |
-
-#### Examples
+| `--no-logs` | Optional, default false. Discard this run's unarchived diagnostic set instead of archiving it; retain all shutdown/ownership/path checks. |
 
 ```bash
-# Preview removal of a stopped instance
-sudo az enclave cleanup --name demo-1 --dry-run
+# Stop the enclave, archive logs, and remove instance data
+sudo az enclave destroy --name demo-1
 
-# Remove retained state after shutdown
-sudo az enclave cleanup --name demo-1
+# List archived log locations using the run ID returned by destroy
+sudo az enclave diagnostics logs --name demo-1 --run-id <run-id>
 
-# Preview cleanup of all confirmed-stopped instances
-sudo az enclave cleanup --dry-run
-
-# Confirm and remove all confirmed-stopped instances
-sudo az enclave cleanup
-
-# Stop and remove in one operation
-sudo az enclave destroy --name demo-1 --cleanup
+# Stop and remove instance data without retaining this run's logs
+sudo az enclave destroy --name demo-1 --no-logs
 ```
 
-#### Important behavior
+Document `--no-logs` data loss, including response/evidence files. It creates no
+archive or leftover staging and does not erase committed archives, even from a
+partial destroy of this run; report those explicitly. It is not secure erasure
+or a purge of backups, external collectors, or Azure CLI diagnostics.
 
-Require confirmation listing the exact names, paths, and actions before any
-deletion unless `--yes` explicitly approves the computed plan; obtain approval
-before shutdown for the combined destroy operation. Without `--yes`,
-noninteractive execution must fail before shutdown/deletion rather than hang
-or implicitly approve. Without
-`--name`, discover the fixed-root inventory and select only confirmed-stopped
-instances. Show running instances as skipped and unverifiable instances as
-blocked; never infer shutdown from a recorded state or missing/corrupt records.
-Reject named cleanup of a live or unverifiable instance and direct live
-instances to destroy first. With no eligible instances, report no action and
-do not prompt. Preserve the original IGVM and external inputs; delete only
-validated instance directories. Release each name only after removal succeeds.
+#### Archive location, contents, and retention
 
-Share validation, confirmation, and removal logic across both paths. Coordinate
-with lifecycle locks through shutdown/removal, recheck full process identities,
-and do not remove shared locks in ways that bypass coordination. Revalidate each
-confirmed target before deletion; never add newly discovered or replaced
-instances to the confirmed set. If a target is now running or unverifiable,
-leave it untouched and report the changed condition. Failed or unconfirmed
-destroy skips deletion; partial removal reports remaining state and allows
-retry rather than claiming success. Bulk results distinguish removed, skipped,
-blocked, and failed instances; blockers or failures are not overall success.
+Use `/var/log/enclave/<name>/<run-id>/` for completed-run diagnostics, separate
+from operational state under `/var/lib`. Archive the three log sources in
+proposal 7, available `instance.json`, `runtime.json`, `worker-error.json`, and
+saved guest response/evidence (`response.json`). Add a diagnostic manifest with
+name/run ID, timestamps, isolation/configuration, available image hash/measurement,
+and archival outcome. These are historical records, not live ownership or
+verified attestation. Exclude sockets, locks, and external images/inputs.
 
-Return stable structured per-target results identifying the name, path, outcome,
-and any skip/block/failure reason. Exit nonzero if any target is blocked or
-failed, including partial success; running instances skipped by bulk cleanup
-are not failures. Keep prompts and diagnostic messages out of structured stdout.
+Assign/persist a unique immutable run ID at launch, not just a timestamp.
+Retries reuse it; reused names get new IDs. Never overwrite/adopt another run's
+archive. Keep active logs in instance directories until writers exit.
 
-Dry-run shows targets, preserved external inputs, name-release effects, and
-blockers without prompting. Suggest the matching cleanup command without
-`--dry-run`, such as `sudo az enclave cleanup --name demo-1` or
-`sudo az enclave cleanup`. For running instances, suggest
-`sudo az enclave destroy --name <name> --cleanup` as a separate, explicitly
-confirmed operation, not part of cleanup. A preview reserves nothing; execution
-recomputes its targets and requires approval of the resulting plan, interactively
-or through explicit `--yes`.
-`destroy --cleanup` has no dry-run option: its confirmation describes both
-shutdown and retained-state deletion before either action. `--yes` skips only
-the prompt, not plan computation, target revalidation, or shutdown verification.
+Archives remain root-owned/private with regular-file/no-symlink validation:
+logs may contain secrets. Keep them until explicit administrator removal, never
+automatic expiration, pruning on destroy/name reuse, or eviction under space
+pressure. Administrators own removal, capacity monitoring, and backups/export
+using host tools; no new extension features. Report archival failures and
+preserve recoverable state. Local storage cannot guarantee indefinite availability.
 
-Test named/bulk selection, mixed running/stopped/unverifiable inventories,
-empty results, confirmation/cancellation, suggested commands, unsafe paths,
-ownership, concurrent state changes, partial failures, unchanged dry-run state,
-successful name reuse only after removal, `--yes`, noninteractive rejection,
-structured partial results, and exit status.
+#### Shutdown, archival, and removal ordering
+
+1. Hold the instance lifecycle lock, validate paths/ownership/full process
+   identities, and confirm shutdown of runtime and log writers. Recorded status
+   or missing/corrupt process records alone are not proof.
+2. Unless `--no-logs`, collect logs, diagnostic state snapshots, saved response/
+   evidence, and archive metadata. Report lost/unreadable files; record legitimate
+   absence from failed launch stages without blocking removal.
+3. If retaining logs, copy to private staging on the archive filesystem, validate
+   completeness/integrity, and durably publish without overwrite. `/var/lib`
+   and `/var/log` may differ; do not assume an atomic cross-root rename.
+4. After archive commit or explicit discard, revalidate/remove only the named
+   instance directory under lifecycle coordination. Release its name only after
+   removal; never follow a concurrent replacement.
+5. Return structured name, run ID, log disposition, nullable archive path, and
+   removal outcome. Account for prior archives; success requires all required
+   archival/removal to complete. Send warnings/errors to stderr.
+
+#### Failure handling, retries, and validation
+
+Unconfirmed shutdown blocks both modes. Archive failure retains original logs/
+state and reserves the name; removal failure retains the committed archive and
+recovery state. Report partial outcomes nonzero with actionable paths. Discard
+mode does not require writable archive storage. Release runtime leases once
+their owners exit; name reservation is separate.
+
+Persist run ID, archive progress, and retention/discard policy until removal
+completes. Retry stopped instances without a live RPC endpoint, recognize owned
+archive commits, and distinguish intentional discard from corruption. After
+archival failure, an explicit `--no-logs` retry may opt out before deletion;
+never discard implicitly. After removal, repeated destroy reports absence
+without altering history or claiming a process was stopped.
+
+Validate both modes after normal/failed launch, complete archives and legitimate
+absence, excluded inputs, writer shutdown, retries at commit/removal boundaries,
+concurrent lifecycle/log access, unsafe paths/collisions, cross-filesystem
+copying, disk/permission errors, and partial-result exit codes. Verify external
+inputs/prior archives remain intact and age/name reuse never triggers pruning.
 
 #### Administrator recovery for unverifiable state
 
-Provide a recovery runbook for missing/corrupt records, interrupted initial
-launch, host reboot, and partial retained-state deletion. Normal cleanup remains
-blocked until shutdown can be established; a missing process record, stale
-status, or free host guard alone is not sufficient proof. Do not add a force
-flag that bypasses ownership or shutdown checks.
+Document recovery for corrupt/missing records, interrupted launch/removal, and
+reboot. No force bypass: stale status, missing records, or a free host guard
+alone cannot prove shutdown. Block normal destroy while state is unverifiable.
 
-The runbook must explain how to preserve available diagnostic evidence, prevent
-new lifecycle operations during recovery, and establish that no runtime can
-still use the affected directory. Where process ownership cannot be established,
-require a controlled host maintenance/reboot procedure that also prevents
-automatic runtime restart, rather than signaling unverified PIDs. A reboot alone
-does not validate paths or authorize deletion.
-
-Only after shutdown and exclusive maintenance are established may an
-administrator remove the exact validated, private, root-owned instance directory.
-Preserve external images/inputs and shared coordination locks; do not fabricate
-replacement ownership records or mark corrupt state destroyed to pass cleanup.
-Document verification of removal and name reuse, and how to resume normal
-operations. Test that unverifiable state stays blocked in ordinary cleanup and
-that partial removal remains diagnosable and recoverable.
+Under exclusive maintenance, preserve diagnostics and establish that no runtime
+can use the directory. If ownership is unknown, require controlled maintenance/
+reboot preventing automatic restart, not signals to unverified PIDs. Reboot
+alone does not authorize deletion. Only then archive/remove the exact validated
+root-owned/private directory, preserving external inputs, archives, and locks.
+Never fabricate ownership/state; verify recovery and safe name reuse.
 
 ## Diagnostics and inspection
 
@@ -342,9 +310,8 @@ that partial removal remains diagnosable and recoverable.
 
 #### Purpose
 
-List retained enclave names and states, or inspect one enclave's configuration,
-runtime observations, and diagnostic locations. Help users identify occupied
-names and the active runtime blocking another launch.
+List managed names/states or inspect one instance's configuration, runtime,
+measurement, and diagnostic paths. Identify occupied names/runtime blockers.
 
 #### Parameters
 
@@ -370,9 +337,9 @@ Illustrative default list output:
 
 ```text
 Name     State
--------  ---------
+-------  ---------------
 demo-1   running
-demo-2   destroyed
+demo-2   removal-pending
 demo-3   failed
 ```
 
@@ -387,6 +354,7 @@ Observed runtime    alive
 Isolation type      snp
 Instance directory  /var/lib/enclave/instances/demo-1
 Image path          /opt/enclave/custom.igvm
+SNP measurement     <96 hexadecimal characters, when available>
 Log directory       /var/lib/enclave/instances/demo-1
 Created at          2026-11-04T20:00:00Z
 Status changed at   2026-11-04T20:00:05Z
@@ -394,175 +362,208 @@ Status changed at   2026-11-04T20:00:05Z
 
 #### Important behavior
 
-Use the fixed root `/var/lib/enclave/instances`; no `--state-dir`. Include all
-retained states, not just running/destroyed. Existing directories reserve names
-until cleanup, and unexpected process exit is not successful destruction.
+Use proposal 3's fixed root. Include all retained states, including pending
+archival/removal; unexpected exit is not successful destruction. Removed
+instances leave the inventory; proposal 7 accesses their archived logs.
 
-Named details include recorded status versus observed process liveness,
-instance/image paths, process identities, persisted isolation configuration,
-and log/response locations. Use name/state rows for list tables and field/value
-rows for named tables; retain structured detail fields for JSON output. Diagnostic contents belong
-in proposal 7. This does not suppress errors encountered while inspecting state.
-Keep structured field names and types stable and represent recorded status and
-observed runtime separately. Use explicit unavailable/changing observations,
-with reasons, rather than presenting missing evidence as healthy or stopped.
-Show UTC ISO 8601 `created_at` and `status_changed_at`: creation time is
-immutable, and last-change time updates
-only on recorded status transitions. Legacy timestamps are unavailable, not
-inferred from file dates; collected evidence is not verified attestation.
+Named details show recorded status separately from observed liveness, process
+identities, isolation/configuration, image/instance/log/response paths, and
+measurement. Keep JSON fields/types stable; list tables use name/state and
+named tables field/value. Missing/changing evidence has an explicit reason,
+not a healthy/stopped default. UTC ISO 8601 `created_at` is immutable;
+`status_changed_at` changes only on status transitions. Legacy timestamps are
+unavailable, not inferred from file dates.
 
-Keep inspection read-only with existing Linux/root, path, and ownership checks.
-Report missing names, unavailable logs, and corrupt/inconsistent records
-explicitly. A missing root means an empty inventory without creating it;
-unsafe/unreadable roots are errors. Report a busy host guard even if its owner
-cannot be identified; an empty list does not prove the host is free.
+#### IGVM measurement in named status
 
-Launch conflicts should suggest status to identify the occupied name or runtime,
-then a new name, destroy, or explicit cleanup as appropriate. Status never
-changes records, stops processes, or retains the runtime lease. Validate
-list/detail output, legacy/stale records, timestamp transitions, and concurrent
-lifecycle activity. Log contents are accessed through proposal 7.
+Use create's `measurements` mapping (`{"snp": "<96-hex-character digest>"}`)
+in named status, not the compact list. This expected launch measurement is not
+the whole-file SHA-256 or verified/live attestation.
 
-Inspection is lock-free and best-effort, not an atomic host-wide snapshot.
-Do not create lock files or wait for lifecycle locks. Read atomically published
-records and check for observable instance replacement or record changes while
-collecting details; bound any retries. Report a detected change as changing or
-unavailable rather than combining contradictory observations into a definitive
-state. An undetected change remains possible after any observation; status is
-not authorization for cleanup.
+Today create reads `series[0].reference.snp_ld` from temporary `image-snp.json`;
+launch saves only the image path/hash. Propose a shared isolation-specific
+reader/calculator at launch, persisting measurement, source, and image hash in
+instance state and retained archive metadata. Status reads saved values without
+the workspace, generator execution, or trusting the current source path.
 
-If an instance disappears during inventory inspection, report that observation
-without crashing the whole listing or claiming successful shutdown. Distinguish
-concurrent disappearance from unsafe paths, unreadable files, and corrupt
-records, which remain explicit inspection errors. Never follow a replacement
-instance that reuses the same name within the original observation. Test
-creation, transitions, deletion, and name reuse during list/detail inspection,
-as well as explicit/configured output precedence.
+**Technical prerequisite:** identify a tool/IGVM reader matching create for
+signed/unsigned images and resource variants; the current sidecar reader cannot
+do this. Do not require another launch sidecar.
+
+Unsupported calculation must not block an otherwise valid launch: warn, persist
+the unavailable reason, and display it in named status. Surface malformed images,
+corrupt state, and actual calculation errors; never substitute a file hash or
+unverified guest report. Source-image replacement must not change saved values.
+
+Validate create/status parity, resource/signing variants, workspace cleanup,
+missing/replaced images, warning-and-continue for unsupported calculation,
+persisted unavailable reasons versus actual errors, and JSON/table output.
+
+#### Read-only inspection and concurrency
+
+Keep Linux/root/path/ownership checks and report missing names/logs or corrupt/
+unsafe/unreadable state explicitly. A missing root is empty, without creation;
+a busy host guard must be reported even without an identifiable owner.
+Launch conflicts suggest status, then a new name or destroy.
+
+Inspection is read-only, lock-free, and best-effort: no record changes, process
+control, lock creation/waits, or runtime lease. Read atomic records, detect
+observable changes/replacement with bounded retries, and report changing/
+unavailable observations rather than combine inconsistent data. Disappearance
+must not crash a listing or imply shutdown; never follow a same-name replacement.
+Status is not an atomic snapshot or authorization for deletion.
+
+Validate list/detail and output precedence, stale/corrupt records, timestamps,
+busy guards, and concurrent creation/transitions/removal/name reuse.
 
 ### 7. Proposed change: `az enclave diagnostics logs`
 
 #### Purpose
 
-Read or follow diagnostics already captured on L1, including from failed or
-destroyed enclaves. This is local, read-only log access, not an interactive L2
-console or a monitoring/health API. Introduce `diagnostics` as a command group
-with a `logs` subcommand now, leaving room for future subcommands such as
-`stack` without changing log access. Only `logs` is in scope here.
+List, read, or follow local L1 logs from active, failed, or destroyed instances.
+Add `diagnostics logs`, leaving room for future diagnostics subcommands; no
+interactive L2 console, monitoring/export, or guest-debug-policy changes.
 
 #### Parameters
 
 | Parameter | Description |
 | --- | --- |
-| `--name`, `-n` | Required instance name under the fixed root |
-| `--source` | Log filename: `com1.log` (default), `openvmm.log`, or `supervisor.log`. One supported filename per invocation, not an arbitrary path. |
-| `--line-count` | Number of most recent lines to show; nonnegative integer, default 100. Zero skips history when following. |
-| `--follow` | Stream appended output until interrupted or the instance/file is removed, replaced, or truncated. |
+| `--name`, `-n` | Required current instance name or archived instance name. |
+| `--run-id` | Optional immutable ID selecting an archived run under `/var/log/enclave/<name>/`, not an arbitrary path. |
+| `--source` | Optional log filename: `com1.log`, `openvmm.log`, or `supervisor.log`. No default file. Omit to list locations and availability without reading contents. |
+| `--line-count` | With `--source`, number of most recent lines to show; nonnegative integer, default 100. Zero skips history when following. Reject an explicitly supplied value without `--source`. |
+| `--follow` | With `--source`, stream appended output until interrupted or the instance/file is removed, replaced, or truncated. Reject without `--source`. |
 
 #### Examples
 
 ```bash
-# Recent guest serial output
+# List log paths and availability; do not dump a default log
 sudo az enclave diagnostics logs --name demo-1
 
-# Runtime diagnostics
-sudo az enclave diagnostics logs --name demo-1 --source openvmm.log --line-count 100
+# Recent guest serial output
+sudo az enclave diagnostics logs --name demo-1 --source com1.log
 
 # Recent serial output followed by live updates
 sudo az enclave diagnostics logs --name demo-1 --source com1.log --line-count 100 --follow
+
+# Read a completed run after destroy, even if its name has been reused
+sudo az enclave diagnostics logs --name demo-1 --run-id <run-id> --source openvmm.log
 ```
 
-Illustrative terminal output:
+Illustrative listing output without `--source`:
 
 ```text
-Instance: demo-1 | Log: /var/lib/enclave/instances/demo-1/com1.log
+Run       Source          Availability  Path
+--------  --------------  ------------  --------------------------------------------------
+<run-id>  com1.log        available     /var/lib/enclave/instances/demo-1/com1.log
+<run-id>  openvmm.log     available     /var/lib/enclave/instances/demo-1/openvmm.log
+<run-id>  supervisor.log  available     /var/lib/enclave/instances/demo-1/supervisor.log
+```
+
+Listing returns structured source/path/availability/run-ID records with normal
+CLI formatting, never file contents. Advise on stderr to use
+`--source <available-file>`, including `--run-id` for archived runs.
+Show missing logs explicitly; empty files are available, unsafe/unreadable files
+are errors. Report known non-retention or an absent run without inventing
+discard history.
+
+Illustrative content output with `--source com1.log`:
+
+```text
+Instance: demo-1 | Run: <run-id> | Log: /var/lib/enclave/instances/demo-1/com1.log
 [guest serial output follows]
 ```
 
-The first line identifies the instance and selected file on stderr; log content
-streams to stdout. Show the label once after successfully opening the validated
-file, including when it is empty or `--line-count 0 --follow` is used.
+Print the instance/run/path label once on stderr after opening the validated
+file, even if empty or `--line-count 0 --follow`; contents stream to stdout.
 
 #### Important behavior
 
-`com1.log` includes only output routed to L2 COM1, not guest-file-only
-application logs. `openvmm.log` contains OpenVMM stdout/stderr;
-`supervisor.log` contains supervisor stdout/stderr. No healthy RPC connection
-or successful guest readiness is required.
+`com1.log` captures L2 COM1 only, not guest-file-only logs; the other sources
+capture OpenVMM/supervisor stdout/stderr. Access requires neither RPC nor guest
+readiness. Proposal 5 owns archival/retention.
 
-Resolve `--source` only from the supported filename allowlist inside the named
-instance directory. Reject other names, absolute paths, and traversal; do not
-silently select a different file.
+Without a run ID, prefer the current instance; otherwise list all archives, or
+read the sole archive. Multiple archives require an explicit run ID for content.
+Explicit IDs select only that archive, even after name reuse. Missing files/
+runs are errors, never permission to fall back.
 
-Stream text to stdout, warnings/errors to stderr, without JSON wrapping or
-unbounded buffering. Escape unsafe terminal controls and handle invalid text
-predictably without altering raw files. Report missing/unreadable logs; empty
-existing files are valid. Enforce private Linux/root access, regular-file/path
-validation, and no symlink escapes.
+Validate Linux/root/private ownership, regular files, name/run-ID components,
+and source allowlist; reject traversal, arbitrary paths, and symlinks. Stream
+content without JSON wrapping or unbounded buffering, escaping unsafe terminal
+controls/invalid text predictably without changing raw files. Send diagnostics
+to stderr; suggest sources rather than dump potentially sensitive content.
 
-Following must not block destroy/cleanup or hold the runtime lease. Surface
-removal/replacement/truncation and end the stream; never switch to a new instance
-that reuses the name. Ordinary EOF waits for more output. Errors should suggest
-the relevant source rather than automatically dumping potentially sensitive
-guest data.
+Follow holds no runtime lease and cannot block destroy. Active EOF waits;
+removal/replacement/truncation ends the stream with a notice, never switching
+instances or to an archive. Archived `--follow` prints requested history,
+reports completion, and exits.
 
-Validate filename selection/defaults, invalid paths, the source label and
-stdout/stderr separation, line-count/follow, large/partial/non-text output,
-safe display, Ctrl+C, unavailable RPC, and concurrent cleanup/name reuse through
-the CLI handler.
-Monitoring/export, interactive input, archive collection, capture/rotation/
-retention changes, structured events, and guest-debug-policy changes are
-outside this CLI-only proposal.
+Validate no-content listing/guidance, explicit sources, option conflicts,
+selection/ambiguity, missing/unsafe files, line-count/follow/Ctrl+C, large/partial/
+non-text output, stdout/stderr separation, unavailable RPC, and concurrent
+destroy/name reuse with post-removal archive access.
 
 ## Image creation and build workspace
 
-### 8. Proposed change: guest application path
+### 8. Proposed change: guest application command line
 
 #### Purpose
 
-Change where create installs and executes the guest application without
-replacing the default init's mounts and initialization.
+Use `--app-cmd-line` to customize everything after the default init's final
+`exec`, preserving mounts/initialization and application installation location.
+This replaces the former `--application-path` proposal.
 
 #### Parameters
 
 | Parameter | Description |
 | --- | --- |
-| `--application-path` | New absolute guest installation/execution path; default `/bin/enclave_app`. A path only, not a shell command or argument list. |
-| `--application` | Existing host executable input; defaults to the packaged application. Independent of its guest path. |
-| `--init-script` | Existing complete guest `/init` replacement. Mutually exclusive with an explicitly supplied `--application-path`. |
+| `--app-cmd-line` | Optional guest-shell command after `exec `. Default SNP command: `/bin/enclave_app serve-vsock 4050`. |
+| `--application` | Existing host executable input, still installed at `/bin/enclave_app`; defaults to the packaged application. Independent of the command-line override. |
+| `--init-script` | Existing complete guest `/init` replacement. Mutually exclusive with an explicitly supplied `--app-cmd-line`, even if it equals the default command. |
 
 #### Examples
 
 ```bash
 az enclave create \
     --application ./my-app \
-    --application-path /opt/my-app \
+    --app-cmd-line '/bin/enclave_app serve-vsock 4050 2>&1' \
     --output-file ./custom.igvm
 ```
 
 For the default SNP profile, the generated init ends with:
 
 ```sh
-exec /opt/my-app serve-vsock 4050
+exec /bin/enclave_app serve-vsock 4050 2>&1
 ```
 
 #### Important behavior
 
-With neither init option, preserve the current default path/init. With
-`--application-path`, install there and generate a matching build-local init,
-retaining the selected isolation profile's startup arguments. With a custom
-init, retain `/bin/enclave_app` placement and leave that script unchanged.
-Reject both options together even when the explicit path equals the default.
+Preserve the default init when omitted. Otherwise create a build-local copy,
+replacing only text after the final application `exec`; do not append defaults,
+alter initialization/installation, or modify source scripts. Custom init bytes
+remain unchanged.
 
-The path option works with packaged or custom applications. Different arguments
-or initialization still require a custom init; readiness compatibility remains
-the customer's responsibility. Generate safely quoted executable paths, create
-parent directories, and reject traversal, invalid/reserved destinations such
-as `/init`, and symlink escapes. Preserve executable checks/permissions and
-never modify source scripts in place.
+The value is trusted guest `/bin/sh` source, not a host command or one quoted
+executable name. Preserve quoting, arguments, expansions, and redirections;
+quote the whole option on the host so expansion occurs in the guest. Never
+evaluate it on the host. Reject blank values, NUL, CR/newlines, and invalid
+generated shell syntax without execution. Avoid logging full command lines;
+discourage secrets in arguments.
 
-Test default/custom inputs, matching installation/init paths, conflicts, safe
-quoting, and path validation. Preserve deterministic composition; path or init
-changes may change the image measurement, so use the rebuilt measurements.
+Accept one executable command with shell quoting, expansions, and redirections;
+the CLI adds `exec`. Top-level pipelines, command lists, backgrounding, and
+compound control flow require `--init-script` for explicit PID 1/process handling.
+**Technical prerequisite:** choose syntax validation tooling enforcing this
+policy without host execution.
+Referenced executables/files must already exist in the guest; the option does
+not install them. Preserve application ELF/permission checks and vsock readiness;
+incompatible commands/ports cannot silently bypass probing.
+
+Validate defaults, full replacement, quoting/expansion/redirection, rejection of
+pipelines/control flow, no host execution, init conflicts, unchanged sources/
+initialization, deterministic composition, and boot/readiness. Return rebuilt
+measurements after init changes.
 
 ### 9. Proposed change: optional build workspace
 
@@ -570,31 +571,74 @@ changes may change the image measurement, so use the rebuilt measurements.
 
 | Parameter | Description |
 | --- | --- |
-| `--workspace` | Existing option becomes optional; default `$HOME/enclave-build` for the invoking user. An explicit path overrides the build parent. |
+| `--workspace` | Becomes optional. Default: a private temporary directory using Python's temp-location policy, normally `/tmp` on Linux and honoring `TMPDIR`. Explicit paths select the build parent. |
+
+Remove `--keep-intermediates`; build intermediates are CLI-managed, not
+customer-facing outputs. An explicit workspace changes location, not retention.
 
 #### Examples
 
 ```bash
-# Default build parent: $HOME/enclave-build
+# CLI-managed temporary build directory; only final output is published
 az enclave create --output-file ./custom.igvm
 
 # Override the build parent
 az enclave create --workspace /mnt/build/enclave --output-file ./custom.igvm
 ```
 
-#### Important behavior
+#### Current workspace inventory
 
-Resolve the home directory at invocation time. Create the parent if needed,
-then a unique private subdirectory for dependencies, composed rootfs/initrd,
-generator configuration/artifacts, and stage logs. This host build area is
-separate from the guest path and fixed runtime state root in proposal 3.
+Today the required workspace holds a private `igvm-build-*` directory from
+`tempfile.mkdtemp`, containing:
 
-Normally remove only the private subdirectory after success or failure; retain
-it with `--keep-intermediates`. Never remove the parent, unrelated files, or
-final output. Preserve input/output overlap checks and fail explicitly on
-unavailable home/unusable workspace, suggesting an override rather than
-silently switching roots. Test defaults/overrides, permissions, overlaps,
-concurrent builds, retention, and safe cleanup.
+| Contents | Why saved / visibility implications |
+| --- | --- |
+| `dependencies/` | Extracted archive dependencies/executable generator; directory bundles are read in place. |
+| `base.cpio`, `rootfs/` | Unpacked initrd/guest filesystem with application and init. |
+| `archive-files`, `application.cpio`, `application-initrd.cpio.gz` | Deterministic listing/repacked guest initrd. |
+| `igvm-manifest.json`, `resources.json` | Generation settings/host paths; proposal 8 adds build-local init. |
+| `image.igvm`, `image-snp.json`, SNP ID-block payload | Generated image, expected measurement, signing inputs. |
+| `id-public-key.pem`, `id-signature.der`, `image-signed.igvm` | Optional signing outputs; the private key is never copied into workspace/image. |
+| Stage `*.log` files | Tool diagnostics; some stdout goes to artifacts. May expose inputs/paths. |
+
+Tools use this directory as `TMPDIR`. Publication also needs `.igvm-*.tmp` beside
+the output, on its filesystem, for no-overwrite publication. Only the final
+image is published; create returns its path/measurements.
+
+#### Build storage and visibility
+
+Keep intermediates out of normal project/home folders and output, not hidden
+from their owner/root. Mode 0700 protects against other unprivileged users;
+dot-prefixes are cosmetic, and deletion is not secure erasure.
+
+Create a unique private directory under the selected temporary or explicit
+parent. A `.enclave-build-` prefix can reduce clutter. Validate capacity and
+execution support: temp storage may be small, memory-backed, `noexec`, or pruned,
+while extraction expands inputs and runs tools. Suggest `--workspace` on failure;
+never silently change roots/permissions. Memory-only/unlinked storage cannot
+generally replace the named files required by build tools.
+
+Build-stage logs remain separate from runtime archives. Include concise
+stage-failure diagnostics in errors before deleting intermediates; do not dump
+sensitive inputs. Always report cleanup failures and the residual directory
+on stderr rather than silently leaving files behind.
+
+Normal create stdout contains only the final image path/measurements. Show
+stage progress with `--verbose` and intermediate paths with `--debug`; errors
+and cleanup-failure paths remain visible regardless of logging level. Neither
+logging option retains intermediates.
+
+#### Important behavior and validation
+
+Create the parent if needed; remove only the private child, never parent,
+unrelated files, or final output. Preserve overlap checks, location-independent
+image/measurement results, and cleanup on success/failure. Crashes can leave
+files; stale-workspace cleanup must not delete active builds.
+
+Validate defaults/overrides, permissions/capacity/execution, concurrent builds,
+success/failure cleanup without retention, cleanup-error disclosure, removed
+parameter rejection, normal/verbose/debug output separation, and unchanged
+results.
 
 ## CLI compatibility
 
@@ -602,26 +646,16 @@ concurrent builds, retention, and safe cleanup.
 
 #### Purpose
 
-Make the declared minimum CLI version reflect tested behavior instead of an
-inherited metadata value. This prevents installations from appearing supported
-when their CLI APIs or Python environment cannot actually run the extension.
-The current `azext.minCliCoreVersion` value of `2.0.67` is a declaration, not a
-validated support floor.
+Replace the inherited `azext.minCliCoreVersion` declaration (`2.0.67`) with the
+oldest verified CLI/Python combination, not metadata-only compatibility.
 
 #### Required changes and validation
 
-Inventory the CLI APIs and Python runtime dependencies used by command loading,
-argument registration, output formatting, and error handling. Test candidate
-older core versions for wheel installation/discovery, help, and the supported
-setup/create/launch/destroy paths on the supported Linux host. Include the
-proposed status/cleanup commands and new create options as they are implemented.
+Inventory command-loading, argument, output, error, and runtime dependencies.
+On supported Linux hosts, test candidate versions for wheel install/discovery,
+help, and setup/create/launch/destroy, including new options, archival/removal,
+status, and diagnostics as implemented.
 
-Set the minimum to the oldest verified version and record the tested CLI,
-Python, and dependency combinations and rationale in the
-[README](../README.rst). Keep the floor aligned with isolation-profile and
-protocol dependency changes. Metadata-gate tests alone do not prove runtime
-compatibility, and an unset maximum does not guarantee compatibility with
-future breaking changes.
-
-These are proposed changes and validation criteria, not claims that lifecycle
-bugs have already been found or the new behaviors are implemented.
+Record tested combinations/rationale in the [README](../README.rst), keeping
+the floor aligned with isolation/protocol dependencies. An unset maximum does
+not guarantee future compatibility.

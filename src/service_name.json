@@ -315,6 +315,11 @@
     "URL": "https://learn.microsoft.com/azure/partner-solutions/elastic/overview"
   },
   {
+    "Command": "az enclave",
+    "AzureServiceName": "Azure Confidential Computing",
+    "URL": ""
+  },
+  {
     "Command": "az fileshare",
     "AzureServiceName": "Azure File Shares",
     "URL": ""
