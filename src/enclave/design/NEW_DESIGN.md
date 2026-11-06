@@ -55,6 +55,10 @@ from ordinary builds.
 
 Set CPU count, guest memory, and isolation while creating the IGVM file. The same settings will be used during launch.
 
+Require explicit `--isolation-type` for create and setup; there is no CLI
+default. Reject omission before side effects. Launch reads image identity
+instead, retaining the legacy SNP compatibility rules below.
+
 Package one versioned isolation manifest JSON per type with the extension,
 sharing defaults and supported settings between create and launch. This is
 extension metadata, not a per-image file or executable plugin.
@@ -90,16 +94,17 @@ defaults in that single source.
 | --- | --- |
 | `create --processor-count <count>` | Optional CPU count; current SNP default 1. Apply before measurement/signing. |
 | `create --memory-mb <MiB>` | Optional guest memory in MiB; current SNP default 160. |
-| `create --isolation-type <type>` | Registry selection, default `snp`; reject unimplemented types. |
+| `create --isolation-type <type>` | Required manifest selection; only `snp` is enabled. Reject missing or unsupported selections before side effects. |
+| `setup --isolation-type <type>` | Required isolation selection for host checks, with no default; only `snp` is enabled. |
 | `launch --igvm <path>` | Required image path; read saved settings automatically, without resource/isolation overrides or companion JSON. |
 
 ```bash
 # Omitted create resources use the supported SNP defaults
-az enclave create --output-file ./default.igvm
+az enclave create --isolation-type snp --output-file ./default.igvm
 sudo az enclave launch --name demo-1 --igvm ./default.igvm
 
 # Illustrative non-default resources, once validated as supported
-az enclave create --processor-count 2 --memory-mb 256 \
+az enclave create --isolation-type snp --processor-count 2 --memory-mb 256 \
     --output-file ./custom.igvm
 sudo az enclave launch --name demo-2 --igvm ./custom.igvm
 ```
@@ -143,7 +148,8 @@ Return the persisted `run_id` with the name and effective settings in launch's
 structured result, using proposal 5's lifecycle identity. Expose it in readable
 launch output as well, so callers can record it before destroy.
 
-Validate defaults/overrides, limits/conversions, device-layout compatibility,
+Validate required isolation selection and rejection before side effects,
+resource defaults/overrides, limits/conversions, device-layout compatibility,
 embedded-configuration round trips, generation/RPC agreement, malformed or
 unsupported metadata, partial/all missing settings and exact fallback warnings,
 shared manifest defaults/schema/version validation, legacy/customer images,
@@ -561,12 +567,13 @@ This replaces the former `--application-path` proposal.
 
 ```bash
 az enclave create \
+    --isolation-type snp \
     --application ./my-app \
     --app-cmd-line '/bin/enclave_app serve-vsock 4050 2>&1' \
     --output-file ./custom.igvm
 ```
 
-For the default SNP profile, the generated init ends with:
+For SNP with the default init, the generated init ends with:
 
 ```sh
 exec /bin/enclave_app serve-vsock 4050 2>&1
@@ -620,10 +627,10 @@ customer-facing outputs. An explicit workspace changes location, not retention.
 
 ```bash
 # CLI-managed temporary build directory; only final output is published
-az enclave create --output-file ./custom.igvm
+az enclave create --isolation-type snp --output-file ./custom.igvm
 
 # Override the build parent
-az enclave create --workspace /mnt/build/enclave --output-file ./custom.igvm
+az enclave create --isolation-type snp --workspace /mnt/build/enclave --output-file ./custom.igvm
 ```
 
 #### Current workspace inventory

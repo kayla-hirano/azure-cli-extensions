@@ -40,6 +40,12 @@ def create_enclave(cmd: AzCliCommand, workspace: str, output_file: str,
             'The packaged dependency bundle is missing at {}. Reinstall the extension, '
             'or supply --dependency-bundle with a trusted archive '
             'or bundle directory.'.format(bundle))
+    enable_debug = '--debug' in cmd.cli_ctx.data['safe_params']
+    if enable_debug:
+        logger.warning(
+            'Debug mode is enabled. Secure Key Release (SKR) policies that require a non-debug enclave '
+            'will deny key release. For testing, ensure your SKR policy explicitly allows debug-enabled '
+            'enclaves; do not use debug mode in production.')
     try:
         result = build_igvm(
             dependency_bundle=bundle,
@@ -50,7 +56,7 @@ def create_enclave(cmd: AzCliCommand, workspace: str, output_file: str,
             output=Path(output_file).expanduser(),
             signing_key=Path(signing_key).expanduser() if signing_key is not None else None,
             debug=keep_intermediates,
-            enable_debug='--debug' in cmd.cli_ctx.data['safe_params'],
+            enable_debug=enable_debug,
             logger=logger)
     except IgvmBuildError as error:
         detail = 'Unable to create Enclave image: {}'.format(error)

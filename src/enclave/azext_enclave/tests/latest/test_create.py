@@ -90,6 +90,7 @@ class CreateCommandTest(unittest.TestCase):
                 packaged.write_bytes(b'archive selection fixture')
                 bundle_args = ['--dependency-bundle', 'bundle'] if flags else []
                 with patch.object(custom, 'DEFAULT_DEPENDENCY_BUNDLE', packaged), \
+                        patch.object(custom.logger, 'warning') as warning, \
                         patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                         Path('image.igvm'), self.measurements)) as build:
                     code = cli.invoke(
@@ -101,6 +102,13 @@ class CreateCommandTest(unittest.TestCase):
                                  {'igvm': 'image.igvm', 'measurements': self.measurements})
                 self.assertIs(build.call_args.kwargs['enable_debug'], enable_debug)
                 self.assertIs(build.call_args.kwargs['debug'], retain)
+                if enable_debug:
+                    warning.assert_called_once_with(
+                        'Debug mode is enabled. Secure Key Release (SKR) policies that require a non-debug enclave '
+                        'will deny key release. For testing, ensure your SKR policy explicitly allows debug-enabled '
+                        'enclaves; do not use debug mode in production.')
+                else:
+                    warning.assert_not_called()
                 self.assertEqual(build.call_args.kwargs['dependency_bundle'],
                                  Path('bundle') if flags else packaged)
                 self.assertEqual(build.call_args.kwargs['application'], custom.DEFAULT_APPLICATION)
