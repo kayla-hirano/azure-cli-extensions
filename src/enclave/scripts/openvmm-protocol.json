@@ -1,0 +1,8 @@
+{
+  "upstream_tag": "openvmm-v0.2.0",
+  "upstream_commit": "49742cf0636bdda0dc94757d6185e5e50254873c",
+  "schema_sha256": "162b24464312acbc337915e230a25f454e5cb547b992ad231c0f9ab1fee9fcf0",
+  "runtime_version": "0.2.0-2.azl3",
+  "grpcio_tools_version": "1.62.3",
+  "protoc_version": "libprotoc 25.1"
+}
