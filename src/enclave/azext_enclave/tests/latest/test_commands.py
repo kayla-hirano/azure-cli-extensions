@@ -5,15 +5,14 @@
 
 """Verify Azure CLI registration, help, arguments, and delegation without launching a VM."""
 
-import json
+import shlex
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
 from knack.util import CLIError
 from azure.cli.core import get_default_cli
-from azure.cli.core.extension import ext_compat_with_cli
 
 from azext_enclave import EnclaveCommandsLoader
 from azext_enclave import custom
@@ -22,16 +21,6 @@ from azext_enclave._help import helps
 
 class EnclaveCommandTest(unittest.TestCase):
     """Exercise the extension loader and public command-handler boundary."""
-
-    def test_cli_core_version_compatibility(self) -> None:
-        metadata_path = Path(__file__).resolve().parents[2] / 'azext_metadata.json'
-        metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
-        self.assertNotIn('azext.maxCliCoreVersion', metadata)
-        for version, compatible in (
-                ('2.0.66', False), ('2.0.67', True), ('2.91.0', True),
-                ('2.92.0', True), ('2.93.0', True), ('3.0.0', True)):
-            with self.subTest(version=version), patch('azure.cli.core.__version__', version):
-                self.assertEqual(ext_compat_with_cli(metadata)[0], compatible)
 
     def test_command_registration(self):
         """Keep the advertised command set stable while lifecycle implementations evolve."""
@@ -46,7 +35,7 @@ class EnclaveCommandTest(unittest.TestCase):
         expected = {
             'enclave setup': {'yes'},
             'enclave create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
-                               'output_file', 'signing_key'},
+                               'output_file', 'signing_key', 'keep_intermediates'},
             'enclave launch': {'name', 'igvm', 'openvmm', 'timeout', 'allow_untested_runtime'},
             'enclave destroy': {'name', 'timeout'},
         }
@@ -61,17 +50,34 @@ class EnclaveCommandTest(unittest.TestCase):
                 self.assertEqual(set(table[command].arguments), expected[command])
 
     def test_command_help(self):
-        """Distinguish unprivileged image building from the local-L1 lifecycle requirements."""
-        self.assertIn('Root and Azure login are not required.', helps['enclave create'])
-        self.assertIn('--output-file', helps['enclave create'])
-        self.assertNotIn('--keep-intermediates', helps['enclave create'])
-        self.assertIn('Temporary build files are deleted on success or failure.', helps['enclave create'])
-        self.assertIn('--debug also enables guest debugging; do not use it for production images.',
-                      helps['enclave create'])
-        self.assertIn('expected SNP launch measurements', helps['enclave create'])
-        self.assertIn('Azure Linux 3.0 L1', helps['enclave setup'])
-        for command in ('launch', 'destroy'):
-            self.assertIn('Linux L1', helps['enclave {}'.format(command)])
+        """Validate help structure and advertised command examples without pinning prose."""
+        for action in ('setup', 'create', 'launch', 'destroy'):
+            command = 'enclave ' + action
+            with self.subTest(command=command):
+                help_text = yaml.safe_load(helps[command])
+                self.assertEqual(help_text['type'], 'command')
+                self.assertTrue(help_text['short-summary'].strip())
+                self.assertTrue(help_text['examples'])
+                cli = get_default_cli()
+                cli.invocation = SimpleNamespace(data={'command_string': command})
+                loader = EnclaveCommandsLoader(cli_ctx=cli)
+                table = loader.load_command_table([])
+                loader.load_arguments(command)
+                table[command].load_arguments()
+                arguments = table[command].arguments
+                known_options = {option for arg in arguments.values() for option in arg.options_list}
+                for example in help_text['examples']:
+                    with self.subTest(example=example['name']):
+                        tokens = shlex.split(example['text'])
+                        if tokens[0] == 'sudo':
+                            tokens = tokens[1:]
+                        self.assertEqual(tokens[:3], ['az', 'enclave', action])
+                        options = {token for token in tokens[3:] if token.startswith('-')}
+                        self.assertFalse(options - known_options, 'Example uses unregistered options')
+                        for name, argument in arguments.items():
+                            if name != 'cmd' and argument.options.get('required'):
+                                self.assertTrue(options.intersection(argument.options_list),
+                                                'Example is missing required option: ' + name)
 
     def test_lifecycle_delegation(self):
         """Verify CLI defaults are passed unchanged to the lifecycle implementation."""

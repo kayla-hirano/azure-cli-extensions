@@ -22,11 +22,14 @@ def load_arguments(self, _):
                               'Replaces the default script; the application is installed at /bin/enclave_app.')
         context.argument('workspace', required=False,
                          help='Parent directory for temporary build files; defaults to the system temporary location '
-                              '(honoring TMPDIR). Needs space and execution support; files are deleted after the build.')
+                              '(honoring TMPDIR). Needs space and execution support.')
         context.argument('output_file', options_list=['--output-file'], required=True,
                          help='Destination IGVM filename. Existing files are never overwritten.')
         context.argument('signing_key',
                          help='Optional unencrypted PEM ECDSA P-384 private key for SNP ID-block signing.')
+        context.argument('keep_intermediates', action='store_true',
+                         help='Keep the private build directory and stage logs on success or failure. '
+                              'The retained path is reported after the build.')
     for command in ('enclave launch', 'enclave destroy'):
         with self.argument_context(command) as context:
             context.argument('name', options_list=['--name', '-n'], required=True,

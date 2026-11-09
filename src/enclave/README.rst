@@ -139,7 +139,12 @@ with GNU cpio and gzip installed::
 
 Build intermediates use a unique private temporary directory, honoring
 ``TMPDIR`` (normally under ``/tmp``). Optional ``--workspace`` selects a
-different parent, useful for storage with enough space and execution support. The packaged inputs are under ``azext_enclave/dependencies/``:
+different parent, useful for storage with enough space and execution support.
+Temporary files are deleted on success or failure by default. Use
+``--keep-intermediates`` to retain the private build directory and stage logs
+instead; its path is reported after the build.
+
+The packaged inputs are under ``azext_enclave/dependencies/``:
 
 * ``dependencies.tar.gz``: the trusted ``measured-pcie-v1`` bundle containing
   the kernel, base initrd, SNP boot shim, ``igvmfilegen``, guest manifest,

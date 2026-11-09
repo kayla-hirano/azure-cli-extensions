@@ -33,9 +33,10 @@ helps['enclave create'] = """
     type: command
     short-summary: Build an enclave image using packaged defaults or your own application.
     long-summary: >
-        Run on Linux or WSL with GNU cpio and gzip. Root and Azure login are not required.
+        Run in a Linux environment (including WSL) with GNU cpio and gzip. Root and Azure login are not required.
         Saves an IGVM image and returns expected SNP launch measurements; does not launch an enclave.
-        Existing output files are never overwritten. Temporary build files are deleted on success or failure.
+        Existing output files are never overwritten.
+        Temporary build files are deleted on success or failure unless --keep-intermediates is set.
         Use --verbose for progress. --debug also enables guest debugging; do not use it for production images.
     examples:
       - name: Create an image with the packaged application and startup script.
