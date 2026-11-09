@@ -38,6 +38,22 @@ without external requests. Never download during metadata inspection, customer
 installation, create, or setup. Shared/profile-specific bundle requirements are
 CLI contracts, not assumed producer publishing requirements.
 
+#### Build-time OpenVMM protocol generation
+
+Retrieve `vmservice.proto` during every wheel build from the
+immutable OpenVMM commit associated with the release tag pinned in
+`scripts/openvmm-protocol.json`, alongside dependency/application retrieval.
+Use a thin `setup.py` build hook and `scripts/generate_protocol.py` to verify
+the schema checksum and runtime pin, then generate Python messages/type stubs
+into private build staging with the pinned compiler.
+
+Keep compiler dependencies build-only and source files unchanged. Fail on
+download, validation, or generation errors without falling back to checked-in
+bindings. Never fetch schemas or generate bindings during metadata inspection,
+customer installation, or CLI commands. Retain manual regeneration for editable
+development and runtime compatibility checks; test retrieval failures,
+generated wheel contents, and unchanged source files.
+
 #### Customer overrides and validation
 
 Preserve independent `--dependency-bundle`, `--application`, and `--init-script`
@@ -47,7 +63,7 @@ borrow missing artifacts from packaged defaults or implicitly replace app/init.
 
 Validate retrieval failures, hashes/paths, safe staging, candidate separation,
 legacy SNP/customer inputs, unchanged default create, and no external requests
-from ordinary builds.
+from ordinary builds before migration.
 
 ### 2. Proposed change: create-time configuration with automatic launch settings
 
