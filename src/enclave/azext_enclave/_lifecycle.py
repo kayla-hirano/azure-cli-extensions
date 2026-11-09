@@ -22,7 +22,7 @@ import grpc
 from knack.log import get_logger
 from knack.util import CLIError
 
-from ._instance import (DEFAULT_STATE_DIR, alive, check_private, cleanup_sockets, host_lock, identity,
+from ._instance import (alive, check_private, cleanup_sockets, host_lock, identity,
                         instance_lock, instance_path, read_record, require_host, stop_owned,
                         write_record)
 from ._rpc import VmClient, create_request
@@ -196,7 +196,7 @@ def _rollback_launch(directory: Path, state: dict, error: BaseException) -> None
 
 
 def launch(name: str, igvm: str, openvmm: str = 'openvmm',
-           state_dir: str = DEFAULT_STATE_DIR, timeout: float = 120,
+           timeout: float = 120,
            allow_untested_runtime: bool = False) -> dict:
     """Create and resume a supervised SNP instance, persisting state and rolling back failures."""
     require_host(timeout)
@@ -209,7 +209,7 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
     executable = resolve_runtime(openvmm, allow_untested_runtime)
     executable_digest = _file_digest(executable)
     image_digest = _file_digest(image)
-    directory = instance_path(state_dir, name)
+    directory = instance_path(name)
     deadline = time.monotonic() + timeout
     with host_lock() as host_lock_fd, instance_lock(directory):
         if directory.exists():
@@ -267,10 +267,10 @@ def _shutdown_runtime(directory: Path, process: dict, deadline: float) -> None:
             logger.debug('OpenVMM exited before acknowledging Quit: %s', error)
 
 
-def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) -> dict:
+def destroy(name: str, timeout: float = 30) -> dict:
     """Reconcile an instance, tear down its VM through RPC, and preserve logs and image files."""
     require_host(timeout)
-    directory = instance_path(state_dir, name)
+    directory = instance_path(name)
     with instance_lock(directory):
         if not directory.exists():
             raise CLIError('Enclave instance not found: {}'.format(name))
@@ -289,18 +289,24 @@ def destroy(name: str, state_dir: str = DEFAULT_STATE_DIR, timeout: float = 30) 
         if server_alive:
             if not worker_alive:
                 logger.warning('Supervisor exited; reconciling the verified owned OpenVMM server via RPC.')
-            if not (directory / 'rpc.sock').is_socket():
-                raise CLIError('Owned OpenVMM is alive but RPC socket is missing; destruction is unconfirmed.')
             try:
+                if not (directory / 'rpc.sock').is_socket():
+                    raise CLIError('Owned OpenVMM is alive but RPC socket is missing; destruction is unconfirmed.')
                 _shutdown_runtime(directory, runtime['openvmm'], time.monotonic() + timeout)
-            except CLIError as error:
+            except (CLIError, OSError, KeyboardInterrupt) as error:
                 # Preserve a retryable failure rather than forcing shutdown after unconfirmed RPC.
                 state['status'] = 'destroy-failed'
-                state['error'] = str(error)
+                state['error'] = str(error) or 'Shutdown interrupted.'
                 write_record(directory / 'instance.json', state)
-                raise CLIError('Destroy RPC failed; instance retained for retry: {}'.format(error)) from error
+                raise CLIError('Destroy RPC failed; instance retained for retry: {}'.format(state['error'])) from error
         # Also reconcile a crashed server/supervisor rather than treating a missing socket as success.
-        _stop_runtime(directory, state)
+        try:
+            _stop_runtime(directory, state)
+        except (CLIError, OSError, KeyboardInterrupt) as error:
+            state.update(status='destroy-failed', cleanup_error=str(error) or 'Cleanup interrupted.')
+            write_record(directory / 'instance.json', state)
+            raise CLIError('Destroy cleanup incomplete; instance retained for retry: {}'.format(
+                state['cleanup_error'])) from error
         if (directory / 'worker-error.json').exists():
             logger.warning('Supervisor reported an error; resources are stopped. Inspect supervisor.log.')
         state['status'] = 'destroyed'

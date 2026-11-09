@@ -11,6 +11,7 @@ The bundle contains executable code and is trusted, not a sandboxed input.
 There is no dependency on the repository's scripts or CLI implementation.
 """
 
+import errno
 import hashlib
 import json
 import logging
@@ -37,7 +38,7 @@ class IgvmBuildResult(NamedTuple):
 
 
 class IgvmBuildError(RuntimeError):
-    """A failed build stage, with a retained workspace when available."""
+    """A failed build stage, with a residual workspace if cleanup failed."""
 
     def __init__(
         self,
@@ -168,7 +169,7 @@ def _dependencies(bundle: Path) -> Dict[str, Path]:
         paths[name] = path
 
     if not os.access(paths["igvmfilegen"], os.X_OK):
-        raise ValueError("Dependency igvmfilegen is not executable")
+        raise ValueError("Dependency igvmfilegen is not executable; check file permissions")
     config = _read_json(paths["igvm_manifest"])
     guests = config.get("guest_configs")
     if (config.get("guest_arch") != "x64"
@@ -395,15 +396,33 @@ def _validate_generated_image(image: Path, stage: str, *, signed: bool = False) 
             stage=stage)
 
 
+def _cleanup_build(work: Optional[Path], staged_output: Optional[Path]) -> None:
+    """Attempt both removals, reporting every residual path without hiding the build error."""
+    errors = []
+    try:
+        if staged_output is not None:
+            staged_output.unlink()
+    except OSError as error:
+        errors.append("Cannot remove publication staging file {}: {}".format(staged_output, error))
+    try:
+        if work is not None:
+            shutil.rmtree(work)
+    except OSError as error:
+        errors.append("Cannot remove build workspace {}: {}".format(work, error))
+    else:
+        work = None
+    if errors:
+        raise IgvmBuildError("Cleanup failed: " + "\n".join(errors), stage="cleanup", workspace=work)
+
+
 def build_igvm(
     *,
     dependency_bundle: Path,
     application: Path,
     init_script: Path,
-    workspace: Path,
     output: Path,
+    workspace: Optional[Path] = None,
     signing_key: Optional[Path] = None,
-    debug: bool = False,
     enable_debug: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> IgvmBuildResult:
@@ -429,15 +448,14 @@ def build_igvm(
     the workspace or image. Password prompts and key generation are not
     supported. Signing failure never falls back to an unsigned image.
 
-    A private directory under ``workspace`` holds rootfs, initrd, generator
-    sidecars, resources, and stage logs. It is removed on success/failure,
-    unless ``debug=True``. A retained failure directory is exposed through
-    IgvmBuildError.workspace. Timestamps follow SOURCE_DATE_EPOCH, defaulting
+    A private directory under ``workspace`` (or Python's temporary location
+    when omitted) holds rootfs, initrd, generator sidecars, resources, and stage
+    logs. It is removed on success/failure. Cleanup failures expose the residual
+    directory through IgvmBuildError.workspace. Timestamps follow SOURCE_DATE_EPOCH, defaulting
     to zero as in the existing packaging script.
 
     An optional caller-configured ``logger`` receives INFO progress and DEBUG
     log paths. Tool output stays in stage files; no handlers are installed.
-    ``debug`` controls workspace retention, not the logging level.
     ``enable_debug`` controls SNP guest debugging, defaulting to disabled
     regardless of the dependency bundle's setting.
 
@@ -463,16 +481,17 @@ def build_igvm(
         init = _input_file(Path(init_script))
         key = (_input_file(Path(signing_key))
                if signing_key is not None else None)
-        parent = Path(workspace).resolve()
+        parent = Path(workspace if workspace is not None else tempfile.gettempdir()).resolve()
         result = _validate_output_paths(bundle, app, init, key, parent, Path(output))
         dependencies = _dependencies(bundle) if bundle.is_dir() else None
         _validate_application(app)
         epoch = _validate_init_and_tools(init, key)
 
         parent.mkdir(parents=True, exist_ok=True)
-        work = Path(tempfile.mkdtemp(prefix="igvm-build-", dir=str(parent)))
+        stage = "prepare-workspace"
+        work = Path(tempfile.mkdtemp(prefix=".enclave-build-", dir=str(parent)))
         if logger is not None:
-            logger.info("Build workspace: %s", work)
+            logger.debug("Build workspace: %s", work)
         if dependencies is None:
             stage = "extract-dependencies"
             extracted = _extract_bundle(bundle, work / "dependencies")
@@ -528,12 +547,11 @@ def build_igvm(
             with generated.open("rb") as source:
                 shutil.copyfileobj(source, destination)
         staged_output.chmod(0o644)
-        if not debug:
-            stage = "cleanup"
-            if logger is not None:
-                logger.info("Removing build workspace")
-            shutil.rmtree(work)
-            work = None
+        stage = "cleanup"
+        if logger is not None:
+            logger.info("Removing build workspace")
+        shutil.rmtree(work)
+        work = None
         stage = "publish"
         # link() fails if another caller published this output meanwhile.
         os.link(staged_output, result)
@@ -542,28 +560,25 @@ def build_igvm(
         return IgvmBuildResult(result, measurements)
     except IgvmBuildError as error:
         failure = error
-        if debug:
-            error.workspace = work
         raise
     except (OSError, ValueError, UnicodeError, struct.error, tarfile.TarError) as error:
-        failure = IgvmBuildError(
-            str(error), stage=stage, workspace=work if debug else None)
+        detail = str(error)
+        if isinstance(error, OSError) and error.errno in (
+                errno.ENOSPC, errno.EDQUOT, errno.EACCES, errno.ENOEXEC, errno.EROFS):
+            detail += "\nCheck build storage space, permissions and execution support; select another --workspace."
+        failure = IgvmBuildError(detail, stage=stage)
         raise failure from error
     except BaseException as error:
         failure = error
         raise
     finally:
         try:
-            if staged_output is not None:
-                staged_output.unlink()
-            if work is not None and not debug:
-                shutil.rmtree(work)
-        except OSError as error:
-            detail = "Cleanup failed; inspect workspace {}: {}".format(
-                work, error)
+            _cleanup_build(work, staged_output)
+        except IgvmBuildError as error:
             if failure is None:
-                raise IgvmBuildError(
-                    detail, stage="cleanup", workspace=work) from error
-            failure.args = ("{}\n{}".format(failure, detail),)
+                raise
+            failure.args = ("{}\n{}".format(failure, error),)
             if isinstance(failure, IgvmBuildError):
-                failure.workspace = work
+                failure.workspace = error.workspace
+            elif logger is not None:
+                logger.error("%s", error)

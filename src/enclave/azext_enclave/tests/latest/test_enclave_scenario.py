@@ -46,9 +46,9 @@ class EnclaveCommandTest(unittest.TestCase):
         expected = {
             'enclave setup': {'yes'},
             'enclave create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
-                               'output_file', 'signing_key', 'keep_intermediates'},
-            'enclave launch': {'name', 'igvm', 'openvmm', 'state_dir', 'timeout', 'allow_untested_runtime'},
-            'enclave destroy': {'name', 'state_dir', 'timeout'},
+                               'output_file', 'signing_key'},
+            'enclave launch': {'name', 'igvm', 'openvmm', 'timeout', 'allow_untested_runtime'},
+            'enclave destroy': {'name', 'timeout'},
         }
         for command in ('enclave setup', 'enclave create', 'enclave launch', 'enclave destroy'):
             with self.subTest(command=command):
@@ -64,8 +64,10 @@ class EnclaveCommandTest(unittest.TestCase):
         """Distinguish unprivileged image building from the local-L1 lifecycle requirements."""
         self.assertIn('Root and Azure login are not required.', helps['enclave create'])
         self.assertIn('--output-file', helps['enclave create'])
-        self.assertIn('--keep-intermediates', helps['enclave create'])
-        self.assertIn('--debug enables SNP guest debugging and diagnostic logs.', helps['enclave create'])
+        self.assertNotIn('--keep-intermediates', helps['enclave create'])
+        self.assertIn('Temporary build files are deleted on success or failure.', helps['enclave create'])
+        self.assertIn('--debug also enables guest debugging; do not use it for production images.',
+                      helps['enclave create'])
         self.assertIn('expected SNP launch measurements', helps['enclave create'])
         self.assertIn('Azure Linux 3.0 L1', helps['enclave setup'])
         for command in ('launch', 'destroy'):
@@ -76,14 +78,13 @@ class EnclaveCommandTest(unittest.TestCase):
         with patch('azext_enclave._lifecycle.launch', return_value={'status': 'running'}) as launch:
             self.assertEqual(custom.launch_enclave('demo', 'demo.igvm'), {'status': 'running'})
             launch.assert_called_once_with(
-                'demo', 'demo.igvm', 'openvmm', '/var/lib/enclave/instances', 120, False)
+                'demo', 'demo.igvm', 'openvmm', 120, False)
         with patch('azext_enclave._lifecycle.destroy', return_value={'status': 'destroyed'}) as destroy:
             self.assertEqual(custom.destroy_enclave('demo'), {'status': 'destroyed'})
-            destroy.assert_called_once_with('demo', '/var/lib/enclave/instances', 30)
+            destroy.assert_called_once_with('demo', 30)
 
     def test_setup_delegation(self) -> None:
         """Keep host preparation separate from Python dependency installation."""
-        self.assertIn('setup.py', helps['enclave setup'])
         with patch('azext_enclave._setup.setup_host', return_value={'status': 'ready'}) as setup:
             self.assertEqual(custom.setup_enclave(), {'status': 'ready'})
             setup.assert_called_once_with(False)

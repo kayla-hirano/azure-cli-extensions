@@ -189,7 +189,7 @@ class InstanceTest(LinuxFilesystemTest):
         """Reject instance names that are empty, too long, or could escape their state root."""
         for name in ('../other', '', 'a/b', 'a' * 33):
             with self.subTest(name=name), self.assertRaisesRegex(CLIError, '--name'):
-                _instance.instance_path('unused', name)
+                _instance.instance_path(name)
 
     def test_host_validation(self):
         """Reject unsupported hosts and invalid timeout values before lifecycle work starts."""
@@ -218,6 +218,14 @@ class InstanceTest(LinuxFilesystemTest):
             with self.assertRaisesRegex(CLIError, 'non-socket'):
                 _instance.cleanup_sockets(directory)
             self.assertTrue((directory / 'rpc.sock').exists())
+
+    def test_refuses_symlink_before_following_socket_target(self) -> None:
+        with patch.object(Path, 'is_symlink', return_value=True), \
+                patch.object(Path, 'is_socket') as is_socket, patch.object(Path, 'unlink') as unlink:
+            with self.assertRaisesRegex(CLIError, 'symlink runtime path'):
+                _instance.cleanup_sockets(Path('instance'))
+        is_socket.assert_not_called()
+        unlink.assert_not_called()
 
     def test_record_round_trip(self):
         """Verify atomic record replacement exposes the newest state and leaves no temporary file."""
@@ -273,7 +281,8 @@ class InstanceTest(LinuxFilesystemTest):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             base.chmod(0o700)
-            directory = _instance.instance_path(str(base), 'demo')
+            with patch('azext_enclave._instance.DEFAULT_STATE_DIR', str(base)):
+                directory = _instance.instance_path('demo')
             with _instance.instance_lock(directory):
                 with self.assertRaisesRegex(CLIError, 'Another command'):
                     with _instance.instance_lock(directory):
@@ -281,8 +290,9 @@ class InstanceTest(LinuxFilesystemTest):
             target = base / 'target'
             target.mkdir(mode=0o700)
             (base / 'link').symlink_to(target, target_is_directory=True)
-            with self.assertRaisesRegex(CLIError, 'symlink'):
-                _instance.instance_path(str(base / 'link'), 'demo')
+            with patch('azext_enclave._instance.DEFAULT_STATE_DIR', str(base / 'link')), \
+                    self.assertRaisesRegex(CLIError, 'symlink'):
+                _instance.instance_path('demo')
 
 
 class GuestProbeTest(LinuxFilesystemTest):
@@ -597,7 +607,7 @@ class LifecycleTest(LinuxFilesystemTest):
         self.assertTrue(self.image.exists())
 
     def test_launch_rejects_busy_host_before_starting_processes(self) -> None:
-        """A different name or custom state root must not bypass the single-enclave policy."""
+        """A different name must not bypass the single-enclave policy."""
         original_exists = Path.exists
         original_stat = Path.stat
         device = SimpleNamespace(st_mode=0o020600)
@@ -611,7 +621,7 @@ class LifecycleTest(LinuxFilesystemTest):
                       side_effect=CLIError('An enclave is already starting or running on this L1.')), \
                 patch('azext_enclave._lifecycle.subprocess.Popen') as popen:
             with self.assertRaisesRegex(CLIError, 'already starting or running'):
-                _lifecycle.launch('another-demo', str(self.image), state_dir=str(self.base / 'other-root'))
+                _lifecycle.launch('another-demo', str(self.image))
             popen.assert_not_called()
         self.assertFalse(self.directory.exists())
 
@@ -719,6 +729,38 @@ class LifecycleTest(LinuxFilesystemTest):
         with patch('azext_enclave._lifecycle.alive', return_value=True):
             with self.assertRaisesRegex(CLIError, 'destruction is unconfirmed'):
                 _lifecycle.destroy('demo')
+        self.assertEqual(_instance.read_record(self.directory / 'instance.json')['status'], 'destroy-failed')
+
+    def test_destroy_cleanup_failure_is_persisted_for_retry(self) -> None:
+        self.prepare_destroy()
+        for error in (CLIError('still alive'), OSError('socket removal denied'), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                with patch('azext_enclave._lifecycle.alive', return_value=False), \
+                        patch('azext_enclave._lifecycle._stop_runtime', side_effect=error):
+                    with self.assertRaisesRegex(CLIError, 'cleanup incomplete.*retained for retry'):
+                        _lifecycle.destroy('demo')
+                state = _instance.read_record(self.directory / 'instance.json')
+                self.assertEqual(state['status'], 'destroy-failed')
+                self.assertEqual(state['cleanup_error'], str(error) or 'Cleanup interrupted.')
+                self.assertTrue(self.image.exists())
+        with patch('azext_enclave._lifecycle.alive', return_value=False), \
+                patch('azext_enclave._lifecycle._stop_runtime'):
+            result = _lifecycle.destroy('demo')
+        self.assertEqual(result['status'], 'destroyed')
+        self.assertNotIn('cleanup_error', result)
+
+    def test_interrupted_shutdown_does_not_force_process_cleanup(self) -> None:
+        self.prepare_destroy()
+        with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                patch('azext_enclave._lifecycle._shutdown_runtime', side_effect=KeyboardInterrupt()), \
+                patch('azext_enclave._lifecycle._stop_runtime') as stop:
+            with self.assertRaisesRegex(CLIError, 'retained for retry.*Shutdown interrupted'):
+                _lifecycle.destroy('demo')
+        stop.assert_not_called()
+        state = _instance.read_record(self.directory / 'instance.json')
+        self.assertEqual(state['status'], 'destroy-failed')
+        self.assertEqual(state['error'], 'Shutdown interrupted.')
 
     def test_repeated_destroy_reconciles_dead_processes(self):
         """Allow repeated cleanup of a recorded instance whose processes have already exited."""

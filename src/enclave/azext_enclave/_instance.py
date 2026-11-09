@@ -34,23 +34,27 @@ def require_host(timeout: float) -> None:
         raise CLIError('--timeout must be a finite positive number of seconds.')
 
 
-def instance_path(state_dir: str, name: str) -> Path:
+def instance_path(name: str) -> Path:
     """Validate the instance name and private state root before constructing socket paths."""
     if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}', name):
         raise CLIError('--name must be 1-32 letters, digits, underscores or hyphens.')
-    base = Path(state_dir).expanduser().absolute()
+    base = _private_root(DEFAULT_STATE_DIR)
+    directory = base / name
+    if directory.is_symlink():
+        raise CLIError('Instance directory must not be a symlink.')
+    return directory
+
+
+def _private_root(root: str) -> Path:
+    """Prepare a CLI-owned state root without traversing symlinks."""
+    base = Path(root).absolute()
     # Never resolve through a symlink into another instance or an untrusted state directory.
     for path in list(reversed(base.parents)) + [base]:
         if path.is_symlink():
             raise CLIError('State directory must not contain symlinks: {}'.format(path))
     base.mkdir(mode=0o700, parents=True, exist_ok=True)
     check_private(base)
-    directory = base / name
-    if len(os.fsencode(str(directory / 'serial.sock'))) >= 108:
-        raise CLIError('--state-dir is too long for Unix socket paths.')
-    if directory.is_symlink():
-        raise CLIError('Instance directory must not be a symlink.')
-    return directory
+    return base
 
 
 def check_private(path: Path) -> None:
@@ -82,8 +86,8 @@ def instance_lock(directory: Path, busy_error: str = 'Another command is managin
 
 @contextmanager
 def host_lock() -> Iterator[int]:
-    """Reserve the single Enclave runtime slot independently of instance names and state roots."""
-    directory = instance_path(HOST_STATE_DIR, 'enclave')
+    """Reserve the single Enclave runtime slot independently of instance names."""
+    directory = _private_root(HOST_STATE_DIR) / 'enclave'
     with instance_lock(
             directory, 'An enclave is already starting or running on this L1. '
             'Destroy the existing instance before launching another.') as descriptor:
@@ -162,7 +166,9 @@ def cleanup_sockets(directory: Path) -> None:
     """Remove known runtime sockets without deleting logs or unexpected filesystem entries."""
     for name in ('rpc.sock', 'serial.sock', 'vsock.sock'):
         path = directory / name
+        if path.is_symlink():
+            raise CLIError('Refusing to remove a symlink runtime path: {}'.format(path))
         if path.is_socket():
             path.unlink()
-        elif path.exists() or path.is_symlink():
+        elif path.exists():
             raise CLIError('Refusing to remove a non-socket runtime path: {}'.format(path))
