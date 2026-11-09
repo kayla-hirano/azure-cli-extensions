@@ -146,30 +146,35 @@ runtime, and private state path. It hashes the image/runtime, acquires the host
 guard and per-instance command lock, and refuses to reuse an existing instance
 directory, including one retained after failure or destroy.
 
-```text
-Launching CLI                 Worker/supervisor             OpenVMM
-(_lifecycle.py)               (_worker.py)                  (child process)
-    |                              |                            |
-    | write instance.json          |                            |
-    | status=starting              |                            |
-    | start detached Python ------>| read instance.json         |
-    | save supervisor identity     | listen on serial.sock      |
-    |                              | start RPC server --------->|
-    |                              | write runtime.json         |
-    | wait for matching, live      |                            |
-    | process ownership            |                            |
-    | wait for gRPC readiness --------------------------------->|
-    | CreateVM ------------------------------------------------>|
-    | write status=paused          |             VM allocated, paused
-    | ResumeVM ------------------------------------------------>|
-    | close client channel         |                 guest executes
-    |                              |<-- guest COM1 output -------|
-    |                              | append to com1.log          |
-    | probe via vsock.sock ------------------------------------>|
-    |       relay CONNECT 4050 -> guest sample response          |
-    | save response.json           |                            |
-    | write status=running         |                            |
-    | return; CLI exits            | remain alive               | remain alive
+```mermaid
+sequenceDiagram
+    participant CLI as Launching CLI (_lifecycle.py)
+    participant Worker as Worker/supervisor (_worker.py)
+    participant OpenVMM as OpenVMM (child process)
+
+    CLI->>CLI: Write instance.json (status=starting)
+    CLI->>Worker: Start detached Python
+    CLI->>CLI: Save supervisor identity
+    Worker->>Worker: Read instance.json
+    Worker->>Worker: Listen on serial.sock
+    Worker->>OpenVMM: Start RPC server
+    Worker->>Worker: Write runtime.json
+    CLI->>CLI: Wait for matching, live process ownership
+    CLI->>OpenVMM: Wait for gRPC readiness
+    CLI->>OpenVMM: CreateVM
+    Note over OpenVMM: VM allocated, paused
+    CLI->>CLI: Write status=paused
+    CLI->>OpenVMM: ResumeVM
+    Note over OpenVMM: Guest executes
+    CLI->>CLI: Close client channel
+    OpenVMM-->>Worker: Guest COM1 output
+    Worker->>Worker: Append to com1.log
+    CLI->>OpenVMM: Probe via vsock.sock (relay CONNECT 4050)
+    OpenVMM-->>CLI: Guest sample response
+    CLI->>CLI: Save response.json
+    CLI->>CLI: Write status=running
+    Note over CLI: Return and exit CLI
+    Note over Worker,OpenVMM: Remain alive
 ```
 
 The worker starts in a new session with CLI input disconnected and its
@@ -233,42 +238,76 @@ not file existence, determines whether the slot is reserved.
 
 ### Failure recovery and destroy
 
-```text
-Recorded launch status:
-    starting -> paused -> running
-         \         \          launch error/interruption
-          +---------+-------> failed (retain error/cleanup evidence)
+**Automatic rollback after launch failure**
 
-destroy:
-    lock instance -> read records -> verify owned runtime
-        |
-        +-- server alive -> PropertiesVM
-        |                   -> TeardownVM if initialized -> Quit
-        |                   -> RPC failure: destroy-failed; retain for retry
-        |
-        +-- server already exited -> reconcile remaining owned processes
-        |
-        v
-    finish owned-process cleanup -> remove known sockets -> destroyed
-    retain instance directory, records, logs, response, and original IGVM
+If launch fails or is interrupted after its initial state record is written,
+rollback sets the outcome to `failed` and requests `Quit` if the RPC socket is
+available. It then attempts owned-process cleanup even if that RPC fails.
+Cleanup waits for/stops the owned supervisor, recovers a remaining owned
+OpenVMM process if necessary, and removes known runtime sockets. The supervisor
+normally reaps its child. Cleanup errors are logged and retained with the
+launch error in the instance record. A `failed` status does not prove that
+all processes stopped; inspect the retained evidence and use destroy to retry
+cleanup.
+
+```mermaid
+flowchart TD
+    Error["Launch error or interruption"] --> Failed["Set status=failed"]
+    Failed --> RPC{"RPC socket available?"}
+    RPC -->|Yes| Quit["Attempt Quit"]
+    RPC -->|No| Cleanup["Attempt owned-process and socket cleanup"]
+    Quit -->|Success or RPC failure| Cleanup
+    Cleanup --> Result{"Cleanup completed?"}
+    Result -->|Yes| Evidence["Save failed instance record<br/>and retain diagnostic evidence"]
+    Result -->|No| CleanupError["Log and record cleanup error"]
+    CleanupError --> Evidence
 ```
 
-Launch rollback requests `Quit` where possible, then attempts owned-process
-recovery, recording cleanup errors rather than hiding incomplete teardown.
-Destroy prefers RPC: `TeardownVM` releases guest resources, whereas `Quit`
-stops the OpenVMM server. A lost Quit reply is accepted only when the owned
-server's exit is confirmed. Unconfirmed RPC failures are retained for retry
-rather than automatically forcing shutdown.
+**Explicit destroy and retry**
 
-After RPC shutdown, or when reconciling an already-exited server, lifecycle
-cleanup waits for/stops the owned supervisor and recovers a remaining owned
-OpenVMM process if necessary. The supervisor normally reaps its child.
-Socket cleanup removes only the known socket endpoints and refuses unexpected
-non-socket entries. Destroy does not delete the image or retained evidence;
-repeated destroy reconciles the same record, but a new launch needs a new name.
-Persisted status is a command outcome, not continuous health monitoring:
-an unexpected runtime exit can leave a previously `running` record until a
-later destroy reconciles it.
+Destroy reconciles an existing instance, including one retained after a
+failed launch or an unexpected runtime exit. It validates records and process
+ownership before using the management endpoint. For a live owned server,
+destroy prefers RPC: `PropertiesVM` checks whether a VM is initialized,
+`TeardownVM` releases its resources if needed, and `Quit` stops the server.
+A lost Quit reply with gRPC `UNAVAILABLE` is accepted only when the owned
+server's exit is confirmed. Unconfirmed RPC failures record `destroy-failed`
+and stop the operation for retry rather than automatically forcing shutdown.
+
+After accepted RPC shutdown, or if the server has already exited, destroy
+finishes owned-process cleanup and removes known runtime sockets. Socket
+cleanup refuses unexpected non-socket entries. Record validation, ownership,
+endpoint, and process/socket cleanup errors also stop the operation, but do
+not necessarily record `destroy-failed`. Only completed cleanup is recorded
+as `destroyed`.
+
+```mermaid
+flowchart TD
+    Lock["Lock instance"] --> Verify["Read and validate records<br/>Verify process ownership"]
+    Verify -->|Valid| Alive{"Owned server alive?"}
+    Verify -->|Validation or ownership error| Stop["Report error and stop<br/>Do not record destroyed"]
+    Alive -->|Yes| Endpoint{"RPC socket available?"}
+    Endpoint -->|No| Stop
+    Endpoint -->|Yes| Properties["PropertiesVM"]
+    Properties --> Initialized{"VM initialized?"}
+    Initialized -->|Yes| Teardown["TeardownVM"]
+    Initialized -->|No| Quit["Quit"]
+    Teardown --> Quit
+    Properties -->|RPC failure| DestroyFailed["Record destroy-failed<br/>Retain for retry"]
+    Teardown -->|RPC failure| DestroyFailed
+    Quit -->|Unconfirmed RPC failure| DestroyFailed
+    Alive -->|No| Cleanup["Finish owned-process cleanup"]
+    Quit -->|Shutdown accepted| Cleanup
+    Cleanup -->|Success| Sockets["Remove known sockets"]
+    Cleanup -->|Error| Stop
+    Sockets -->|Error| Stop
+    Sockets -->|Success| Destroyed["Record destroyed"]
+```
+
+Successful destroy stops owned processes and removes known runtime sockets;
+it does not delete the instance directory, records, logs, response, or original
+IGVM. Retry destroy against the same record after a failure. Repeated destroy
+reconciles the same record, but a new launch requires a new instance name.
 
 ## `az enclave setup`
 
