@@ -56,7 +56,7 @@ helps['enclave launch'] = """
     long-summary: >
         Run as root on Linux L1 after setup. Choose an unused name.
         The enclave keeps running after this command exits; destroy it before launching another.
-        Returns status and log paths under /var/lib/enclave/instances/<name>.
+        Returns status and log paths under /var/lib/enclave/instances.
         Checks that the guest responds, but does not verify attestation or release keys.
     examples:
       - name: Launch an image created with enclave create.
