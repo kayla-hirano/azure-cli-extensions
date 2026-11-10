@@ -140,9 +140,8 @@ with GNU cpio and gzip installed::
 Build intermediates use a unique private temporary directory, honoring
 ``TMPDIR`` (normally under ``/tmp``). Optional ``--workspace`` selects a
 different parent, useful for storage with enough space and execution support.
-Temporary files are deleted on success or failure by default. Use
-``--keep-intermediates`` to retain the private build directory and stage logs
-instead; its path is reported after the build.
+Temporary files and stage logs are deleted on success or failure. Cleanup
+failures report any remaining paths so they can be inspected and removed.
 
 The packaged inputs are under ``azext_enclave/dependencies/``:
 

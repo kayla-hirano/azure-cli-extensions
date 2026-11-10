@@ -31,7 +31,7 @@ def setup_enclave(yes: bool = False) -> dict:
 def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str] = None,
                    dependency_bundle: Optional[str] = None, init_script: Optional[str] = None,
                    signing_key: Optional[str] = None,
-                   application: Optional[str] = None, keep_intermediates: bool = False) -> dict:
+                   application: Optional[str] = None) -> dict:
     """Compose an IGVM from trusted dependencies and a packaged or caller-supplied application."""
     from ._image_builder import IgvmBuildError, build_igvm
     bundle = Path(dependency_bundle).expanduser() if dependency_bundle is not None else DEFAULT_DEPENDENCY_BUNDLE
@@ -55,13 +55,12 @@ def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str]
             workspace=Path(workspace).expanduser() if workspace is not None else None,
             output=Path(output_file).expanduser(),
             signing_key=Path(signing_key).expanduser() if signing_key is not None else None,
-            keep_intermediates=keep_intermediates,
             enable_debug=enable_debug,
             logger=logger)
     except IgvmBuildError as error:
         detail = 'Unable to create Enclave image: {}'.format(error)
         if error.workspace is not None:
-            detail += '\nBuild workspace available at: {}'.format(error.workspace)
+            detail += '\nBuild cleanup incomplete; residual workspace: {}'.format(error.workspace)
         raise CLIError(detail) from error
     return {'igvm': str(result.igvm), 'measurements': result.measurements}
 

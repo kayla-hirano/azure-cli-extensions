@@ -27,9 +27,6 @@ def load_arguments(self, _):
                          help='Destination IGVM filename. Existing files are never overwritten.')
         context.argument('signing_key',
                          help='Optional unencrypted PEM ECDSA P-384 private key for SNP ID-block signing.')
-        context.argument('keep_intermediates', action='store_true',
-                         help='Keep the private build directory and stage logs on success or failure. '
-                              'The retained path is reported after the build.')
     for command in ('enclave launch', 'enclave destroy'):
         with self.argument_context(command) as context:
             context.argument('name', options_list=['--name', '-n'], required=True,

@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 from types import SimpleNamespace
+from typing import Callable
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -47,7 +48,7 @@ class CreateCommandTest(unittest.TestCase):
         build.assert_called_once_with(
             dependency_bundle=Path('bundle'), application=custom.DEFAULT_APPLICATION,
             init_script=custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init', workspace=Path('work'),
-            output=Path('image.igvm'), signing_key=None, keep_intermediates=False, enable_debug=False,
+            output=Path('image.igvm'), signing_key=None, enable_debug=False,
             logger=custom.logger)
 
     def test_signing_and_workspace_override(self) -> None:
@@ -61,11 +62,8 @@ class CreateCommandTest(unittest.TestCase):
         self.assertIs(build.call_args.kwargs['enable_debug'], False)
 
     def test_global_debug_flag_through_cli_invocation(self) -> None:
-        for flags, enable_debug, keep in (
-                ([], False, False), (['--verbose'], False, False), (['--debug'], True, False),
-                (['--keep-intermediates'], False, True),
-                (['--verbose', '--keep-intermediates'], False, True),
-                (['--debug', '--keep-intermediates'], True, True)):
+        for flags, enable_debug in (
+                ([], False), (['--verbose'], False), (['--debug'], True)):
             with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory:
                 cli = create_cli(directory)
                 output = io.StringIO()
@@ -84,7 +82,6 @@ class CreateCommandTest(unittest.TestCase):
                 self.assertEqual(json.loads(output.getvalue()),
                                  {'igvm': 'image.igvm', 'measurements': self.measurements})
                 self.assertIs(build.call_args.kwargs['enable_debug'], enable_debug)
-                self.assertIs(build.call_args.kwargs['keep_intermediates'], keep)
                 self.assertIsNone(build.call_args.kwargs['workspace'])
                 if enable_debug:
                     warning.assert_called_once_with(
@@ -98,7 +95,7 @@ class CreateCommandTest(unittest.TestCase):
                 self.assertEqual(build.call_args.kwargs['application'], custom.DEFAULT_APPLICATION)
 
     def test_build_errors_include_stage_and_residual_workspace(self) -> None:
-        for workspace in (None, Path('retained')):
+        for workspace in (None, Path('residual')):
             with self.subTest(workspace=workspace):
                 error = builder.IgvmBuildError('tool failed', stage='generate-igvm', workspace=workspace)
                 with patch.object(builder, 'build_igvm', side_effect=error):
@@ -106,7 +103,7 @@ class CreateCommandTest(unittest.TestCase):
                         custom.create_enclave(self.cmd, 'image.igvm', workspace='work', dependency_bundle='bundle')
                 self.assertIn('generate-igvm: tool failed', str(raised.exception))
                 self.assertIs(raised.exception.__cause__, error)
-                self.assertEqual('Build workspace available at:' in str(raised.exception),
+                self.assertEqual('Build cleanup incomplete; residual workspace:' in str(raised.exception),
                                  workspace is not None)
 
     def test_required_inputs_and_nonconflicting_options(self) -> None:
@@ -121,7 +118,6 @@ class CreateCommandTest(unittest.TestCase):
         self.assertEqual({name for name, arg in arguments.items()
                           if arg.options.get('required') and name != 'cmd'}, required)
         self.assertEqual(arguments['output_file'].options_list, ['--output-file'])
-        self.assertIs(arguments['keep_intermediates'].options['default'], False)
         self.assertIsNone(arguments['workspace'].options['default'])
         self.assertIsNone(arguments['signing_key'].options['default'])
         self.assertIsNone(arguments['init_script'].options['default'])
@@ -376,6 +372,18 @@ class ImageBuilderTest(unittest.TestCase):
         else:
             self.fail('Unexpected stage: ' + stage)
 
+    def inspect_stage(self, target: str, check: Callable[[Path], None]) -> MagicMock:
+        """Inspect files at an external-command boundary without changing cleanup behavior."""
+        inspection = MagicMock(side_effect=check)
+
+        def run(argv, stage, work, **kwargs):
+            self.run_stage(argv, stage, work, **kwargs)
+            if stage == target:
+                inspection(work)
+
+        self.run.side_effect = run
+        return inspection
+
     def test_unsigned_pipeline_and_cleanup(self) -> None:
         result = self.inputs.build()
         self.assertEqual(result.igvm, self.inputs.output)
@@ -388,67 +396,34 @@ class ImageBuilderTest(unittest.TestCase):
         self.assertEqual(self.inputs.application.read_bytes()[:4], b'\x7fELF')
         self.assertEqual((self.inputs.bundle / 'base_initrd').read_bytes(), b'base-initrd')
 
-    def test_keep_intermediates_retains_build_on_success_or_failure(self) -> None:
-        for outcome in ('success', 'stage-error', 'storage-error', 'interrupted'):
-            with self.subTest(outcome=outcome):
-                logger = MagicMock()
-                before = set(self.inputs.workspace.iterdir()) if self.inputs.workspace.exists() else set()
-                error = {
-                    'stage-error': builder.IgvmBuildError('tool failed', stage='generate-igvm'),
-                    'storage-error': OSError(errno.ENOSPC, 'no space'),
-                    'interrupted': KeyboardInterrupt(),
-                }.get(outcome)
-
-                def run(argv, stage, work, **kwargs):
-                    self.run_stage(argv, stage, work, **kwargs)
-                    if stage == 'generate-igvm' and error is not None:
-                        raise error
-
-                self.run.side_effect = run
-                with patch.object(builder.shutil, 'rmtree') as remove:
-                    if error is None:
-                        result = self.inputs.build(keep_intermediates=True, logger=logger)
-                        self.assertEqual(result.measurements, {'snp': self.inputs.measurement})
-                        self.assertEqual(list(self.inputs.output.parent.iterdir()), [self.inputs.output])
-                        self.inputs.output.unlink()
-                    else:
-                        expected = KeyboardInterrupt if outcome == 'interrupted' else builder.IgvmBuildError
-                        with self.assertRaises(expected) as raised:
-                            self.inputs.build(keep_intermediates=True, logger=logger)
-                        self.assertFalse(self.inputs.output.exists())
-                    remove.assert_not_called()
-                work, = set(self.inputs.workspace.iterdir()) - before
-                self.assertTrue((work / 'generate-igvm.log').is_file())
-                self.assertTrue((work / 'rootfs').is_dir())
-                logger.warning.assert_called_once_with('Build workspace retained at: %s', work)
-                if error is not None and outcome != 'interrupted':
-                    self.assertEqual(raised.exception.workspace, work)
-
-    def test_keep_intermediates_with_default_temporary_parent(self) -> None:
+    def test_default_workspace_is_private_and_cleaned(self) -> None:
         parent = self.inputs.root / 'temporary'
         parent.mkdir()
+
+        def inspect(work):
+            self.assertEqual(work.parent, parent)
+            self.assertTrue(work.name.startswith('.enclave-build-'))
+            if os.name == 'posix':
+                self.assertEqual(work.stat().st_mode & 0o777, 0o700)
+            self.assertTrue((work / 'image.igvm').is_file())
+
+        inspection = self.inspect_stage('generate-igvm', inspect)
         with patch.dict(os.environ, {'TMPDIR': str(parent)}), patch.object(tempfile, 'tempdir', None):
-            self.inputs.build(workspace=None, keep_intermediates=True)
-        work, = parent.iterdir()
-        self.assertTrue(work.name.startswith('.enclave-build-'))
-        if os.name == 'posix':
-            self.assertEqual(work.stat().st_mode & 0o777, 0o700)
-        self.assertTrue((work / 'image.igvm').is_file())
+            self.inputs.build(workspace=None)
+        inspection.assert_called_once()
+        self.assertEqual(list(parent.iterdir()), [])
         self.assertEqual(list(self.inputs.output.parent.iterdir()), [self.inputs.output])
 
-    def test_keep_intermediates_cleans_staging_after_publication_failure(self) -> None:
+    def test_publication_failure_cleans_staging_and_workspace(self) -> None:
         with patch.object(builder.os, 'link', side_effect=OSError('publication failed')):
-            with self.assertLogs(builder.__name__, level='WARNING') as logs:
-                with self.assertRaises(builder.IgvmBuildError) as raised:
-                    self.inputs.build(keep_intermediates=True)
-        work, = self.inputs.workspace.iterdir()
+            with self.assertRaisesRegex(builder.IgvmBuildError, 'publication failed') as raised:
+                self.inputs.build()
         self.assertEqual(raised.exception.stage, 'publish')
-        self.assertEqual(raised.exception.workspace, work)
-        self.assertTrue((work / 'image.igvm').is_file())
-        self.assertIn(str(work), logs.output[0])
+        self.assertIsNone(raised.exception.workspace)
+        self.assertEqual(list(self.inputs.workspace.iterdir()), [])
         self.assertEqual(list(self.inputs.output.parent.iterdir()), [])
 
-    def test_keep_intermediates_reports_workspace_when_staging_cleanup_fails(self) -> None:
+    def test_staging_cleanup_failure_after_publication_is_reported(self) -> None:
         original_unlink = Path.unlink
 
         def unlink(path, *args, **kwargs):
@@ -458,12 +433,14 @@ class ImageBuilderTest(unittest.TestCase):
 
         with patch.object(Path, 'unlink', autospec=True, side_effect=unlink):
             with self.assertRaisesRegex(builder.IgvmBuildError, 'staging removal denied') as raised:
-                self.inputs.build(keep_intermediates=True)
-        work, = self.inputs.workspace.iterdir()
+                self.inputs.build()
         self.assertEqual(raised.exception.stage, 'cleanup')
-        self.assertEqual(raised.exception.workspace, work)
-        self.assertTrue((work / 'image.igvm').is_file())
+        self.assertIsNone(raised.exception.workspace)
+        self.assertEqual(list(self.inputs.workspace.iterdir()), [])
         self.assertTrue(self.inputs.output.is_file())
+        staging, = (path for path in self.inputs.output.parent.iterdir() if path != self.inputs.output)
+        self.assertTrue(staging.name.startswith('.igvm-'))
+        self.assertIn(str(staging), str(raised.exception))
 
     def test_default_temp_location_and_explicit_parent_have_same_results(self) -> None:
         explicit = self.inputs.build()
@@ -585,18 +562,18 @@ class ImageBuilderTest(unittest.TestCase):
                     archive.add(directory, arcname=prefix or '.')
                 self.inputs.bundle = archive_path
                 self.inputs.archive_prefix = prefix
-                for keep in (False, True):
-                    with self.subTest(keep_intermediates=keep):
-                        result = self.inputs.build(keep_intermediates=keep)
-                        self.assertEqual(result.measurements, {'snp': self.inputs.measurement})
-                        self.assertEqual(result.igvm, self.inputs.output)
-                        if keep:
-                            work, = self.inputs.workspace.iterdir()
-                            manifest = work / 'dependencies' / prefix / 'dependency-manifest.v1.json'
-                            self.assertTrue(manifest.is_file())
-                            shutil.rmtree(work)
-                        self.assertEqual(list(self.inputs.workspace.iterdir()), [])
-                        self.inputs.output.unlink()
+
+                def inspect(work):
+                    manifest = work / 'dependencies' / prefix / 'dependency-manifest.v1.json'
+                    self.assertTrue(manifest.is_file())
+
+                inspection = self.inspect_stage('generate-igvm', inspect)
+                result = self.inputs.build()
+                inspection.assert_called_once()
+                self.assertEqual(result.measurements, {'snp': self.inputs.measurement})
+                self.assertEqual(result.igvm, self.inputs.output)
+                self.assertEqual(list(self.inputs.workspace.iterdir()), [])
+                self.inputs.output.unlink()
 
     def test_corrupt_archive_fails_before_build_and_cleans_workspace(self) -> None:
         archive_path = self.inputs.root / 'broken.tar.gz'
@@ -622,58 +599,64 @@ class ImageBuilderTest(unittest.TestCase):
         self.run.assert_not_called()
 
     def test_composed_rootfs_and_normalized_metadata(self) -> None:
-        self.inputs.build(keep_intermediates=True)
-        work, = self.inputs.workspace.iterdir()
-        root = work / 'rootfs'
-        self.assertEqual((root / 'bin' / 'enclave_app').read_bytes(), self.inputs.application.read_bytes())
-        self.assertEqual((root / 'init').read_bytes(), self.inputs.init.read_bytes())
-        self.assertEqual((root / 'base-file').read_bytes(), b'preserved')
-        self.assertFalse((root / 'bin' / 'appliance').exists())
-        self.assertFalse((root / 'appliance').exists())
-        self.assertEqual(int((root / 'init').stat().st_mtime), 123)
-        paths = (work / 'archive-files').read_bytes().split(b'\0')[:-1]
-        self.assertEqual(paths, sorted(paths))
-        self.assertTrue((work / 'generate-igvm.log').is_file())
+        def inspect(work):
+            root = work / 'rootfs'
+            self.assertEqual((root / 'bin' / 'enclave_app').read_bytes(), self.inputs.application.read_bytes())
+            self.assertEqual((root / 'init').read_bytes(), self.inputs.init.read_bytes())
+            self.assertEqual((root / 'base-file').read_bytes(), b'preserved')
+            self.assertFalse((root / 'bin' / 'appliance').exists())
+            self.assertFalse((root / 'appliance').exists())
+            self.assertEqual(int((root / 'init').stat().st_mtime), 123)
+            paths = (work / 'archive-files').read_bytes().split(b'\0')[:-1]
+            self.assertEqual(paths, sorted(paths))
+            self.assertTrue((work / 'generate-igvm.log').is_file())
+
+        inspection = self.inspect_stage('generate-igvm', inspect)
+        self.inputs.build()
+        inspection.assert_called_once()
+        self.assertEqual(list(self.inputs.workspace.iterdir()), [])
 
     def test_signed_image_only_and_private_key_not_copied(self) -> None:
-        for keep in (False, True):
-            with self.subTest(keep_intermediates=keep):
-                result = self.inputs.build(signing_key=self.inputs.key, keep_intermediates=keep)
-                self.assertEqual(result.measurements, {'snp': self.inputs.measurement})
-                self.assertEqual(self.inputs.output.read_bytes(), b'signed image')
-                self.assertEqual(self.stages[-3:], [
-                    'export-id-public-key', 'sign-id-block', 'add-snp-id-block'])
-                if keep:
-                    work, = self.inputs.workspace.iterdir()
-                    self.assertEqual((work / 'id-public-key.pem').read_bytes(), b'public key')
-                    self.assertFalse(any(path.is_file() and path.read_bytes() == self.inputs.key.read_bytes()
-                                         for path in work.rglob('*')))
-                else:
-                    self.assertEqual(list(self.inputs.workspace.iterdir()), [])
-                self.assertEqual(self.inputs.key.read_bytes(), b'caller-owned-test-key')
-                self.inputs.output.unlink()
+        def inspect(work):
+            self.assertEqual((work / 'id-public-key.pem').read_bytes(), b'public key')
+            self.assertFalse(any(path.is_file() and path.read_bytes() == self.inputs.key.read_bytes()
+                                 for path in work.rglob('*')))
+
+        inspection = self.inspect_stage('add-snp-id-block', inspect)
+        result = self.inputs.build(signing_key=self.inputs.key)
+        inspection.assert_called_once()
+        self.assertEqual(result.measurements, {'snp': self.inputs.measurement})
+        self.assertEqual(self.inputs.output.read_bytes(), b'signed image')
+        self.assertEqual(self.stages[-3:], [
+            'export-id-public-key', 'sign-id-block', 'add-snp-id-block'])
+        self.assertEqual(list(self.inputs.workspace.iterdir()), [])
+        self.assertEqual(self.inputs.key.read_bytes(), b'caller-owned-test-key')
 
     def test_guest_debug_is_independent_of_cleanup_and_bundle(self) -> None:
         original = (self.inputs.bundle / 'igvm_manifest').read_bytes()
         for enable_debug in (False, True):
-            for keep in (False, True):
-                with self.subTest(enable_debug=enable_debug, keep_intermediates=keep):
-                    result = self.inputs.build(enable_debug=enable_debug, keep_intermediates=keep)
-                    if keep:
-                        work, = self.inputs.workspace.iterdir()
-                        config = json.loads((work / 'igvm-manifest.json').read_text(encoding='utf-8'))
-                        self.assertIs(config['guest_configs'][0]['isolation_type']['snp']['enable_debug'], enable_debug)
-                        shutil.rmtree(work)
-                    self.assertEqual(list(self.inputs.workspace.iterdir()), [])
-                    self.assertEqual((self.inputs.bundle / 'igvm_manifest').read_bytes(), original)
-                    self.assertEqual(result.measurements, {'snp': self.inputs.measurement})
-                    self.inputs.output.unlink()
+            with self.subTest(enable_debug=enable_debug):
+                def inspect(work):
+                    config = json.loads((work / 'igvm-manifest.json').read_text(encoding='utf-8'))
+                    self.assertIs(config['guest_configs'][0]['isolation_type']['snp']['enable_debug'], enable_debug)
+
+                inspection = self.inspect_stage('generate-igvm', inspect)
+                result = self.inputs.build(enable_debug=enable_debug)
+                inspection.assert_called_once()
+                self.assertEqual(list(self.inputs.workspace.iterdir()), [])
+                self.assertEqual((self.inputs.bundle / 'igvm_manifest').read_bytes(), original)
+                self.assertEqual(result.measurements, {'snp': self.inputs.measurement})
+                self.inputs.output.unlink()
 
     def test_default_disables_guest_debug_from_bundle(self) -> None:
-        self.inputs.build(keep_intermediates=True)
-        work, = self.inputs.workspace.iterdir()
-        config = json.loads((work / 'igvm-manifest.json').read_text(encoding='utf-8'))
-        self.assertIs(config['guest_configs'][0]['isolation_type']['snp']['enable_debug'], False)
+        def inspect(work):
+            config = json.loads((work / 'igvm-manifest.json').read_text(encoding='utf-8'))
+            self.assertIs(config['guest_configs'][0]['isolation_type']['snp']['enable_debug'], False)
+
+        inspection = self.inspect_stage('generate-igvm', inspect)
+        self.inputs.build()
+        inspection.assert_called_once()
+        self.assertEqual(list(self.inputs.workspace.iterdir()), [])
 
     def test_invalid_measurements_fail_before_publication(self) -> None:
         for document in (
