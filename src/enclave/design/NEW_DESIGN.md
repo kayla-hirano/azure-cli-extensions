@@ -156,6 +156,26 @@ If insufficient, agree versioned embedded metadata and a validated reader with
 generator/runtime owners. Do not append arbitrary data or assume current tool
 support. Defaults cannot recover lost custom values.
 
+**Remaining decision: how launch recovers the chosen CPU/memory values.**
+This proposal says to store them in supported IGVM fields or agreed embedded
+metadata, but the mechanism is not yet specified:
+
+- Can existing IGVM fields reliably store and expose those exact choices?
+  Confirm this with the pinned generator/runtime owners.
+- If not, what embedded metadata format will we use, and how will create write
+  it and launch read it?
+
+For example, the manifest may default to 1 CPU / 160 MiB while a user creates
+an image with 2 CPUs / 256 MiB, assuming those values are supported. After copying
+that image to another machine, launch must recover 2 / 256. The manifest only
+knows the defaults; passing custom values to the generator does not itself
+guarantee a supported way to read them back.
+
+The proposal's architecture is sufficient; its storage/readback mechanism is
+not yet specified. Before implementing proposal 2, choose that mechanism and
+verify that the supported tools preserve it through generation and signing.
+This does not block the current default-only isolation change.
+
 Save identity, effective settings, image/default provenance, and final image
 hash for status. A hash does not prove configuration, publisher authenticity,
 or attestation.

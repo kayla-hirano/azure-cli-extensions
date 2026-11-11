@@ -1,212 +1,282 @@
 # Enclave isolation type support
 
-## 1. Objective and scope
+## 1. Scope and current limitations
 
-Package one versioned isolation manifest JSON per type, shared with
-[NEW_DESIGN.md](NEW_DESIGN.md), proposal 2. Store defaults, supported
-configurations, required artifacts, and operation capabilities as data.
-Existing workflows read the selected manifest and check operation support.
+Centralize isolation-specific configuration, requirements, and defaults in a
+packaged manifest. **Only SNP is enabled in this change**. Keep shared policy and lifecycle code in Python: no profile selector, plugins, per-type workers, or duplicated flows.
 
-Keep the current module layout; no per-type profile classes, handler hierarchy,
-or duplicated lifecycle code. Measurement parsing, signing, host probes, RPC
-serialization, and guest exchanges remain Python logic, with explicit isolation
-checks where behavior differs. JSON describes support; it does not implement it.
+Today, create requires an SNP Linux-direct recipe and fixed artifact set.
+Launch hashes the image but does not inspect its platforms; it unconditionally
+requests SNP, one CPU, 160 MiB, and fixed COM1/PCIe/vsock settings. Readiness
+requires an SNP-shaped report. Instance records do not identify isolation.
 
-Move isolation-specific defaults and settings into the packaged SNP manifest, preserving their current values and behavior. Keep the existing dependency bundle, application/init defaults, customer overrides, bundle schema, RPC bindings, and runtime pins unchanged.
+**In scope:** manifest-backed create/launch, standard IGVM platform
+inspection, an optional validated launch selector, and explicit instance identity.
+No backward compatibility with earlier development commands or records is required.
+**Deferred:** customer CPU/memory overrides and image-embedded effective-settings
+metadata from [NEW_DESIGN.md](NEW_DESIGN.md) proposal 2, additional isolation
+implementations, dependency retrieval, runtime/protocol upgrades,
+status/diagnostics, and workspace/path/cleanup changes.
 
-## 2. Current constraints
+This document supersedes proposal 2's isolation-selection rules. Future
+CPU/memory overrides reuse the same SNP manifest and fixed boot/device layout;
+they are not prerequisites for this default-only change.
 
-| Area | SNP-specific behavior today |
+## 2. Code changes by file
+
+Paths below are under `azext_enclave/` unless stated otherwise. Add two small
+helpers and one JSON file; refactor existing functions in place.
+
+| File / function | Required change |
 | --- | --- |
-| Bundle validation | Requires schema 1, `measured-pcie-v1`, x86-64, and the same artifact identifiers for every build, including `snp_bootshim`. |
-| Image generation | Requires an SNP Linux-direct configuration, applies SNP guest-debug settings, reads SNP measurements, and optionally signs an SNP ID block. |
-| Runtime request | `_rpc.py` unconditionally selects SNP isolation and Linux-direct IGVM boot with fixed resources/devices. |
-| Readiness | `_lifecycle.py` requires the sample exchange and an SNP-shaped report; it does not verify attestation. |
-| Protocol | The checked-in RPC schema represents SNP and non-confidential isolation, but not TDX isolation. |
-| Packaging | `setup.py` packages existing resource files. Individual-artifact retrieval and combined-bundle assembly are not implemented. |
+| **New `manifests/snp.json`** | Package the configuration shown in section 4. |
+| **New `_isolation.py`** | Add an explicit enabled-type/file mapping, installed-resource lookup, and typed schema validation. Reject missing fields, malformed/contradictory values, and unsupported versions. No customer isolation-manifest paths or directory discovery. |
+| **New `_igvm.py`** | Add a bounded header reader and pure selection function following section 3. Return declared platforms and selected type/version/VTL/mask; distinguish malformed, ambiguous, and unsupported errors. |
+| `_params.py:load_arguments()` | Register `--isolation-type` as specified in section 3; keep other arguments unchanged. |
+| `custom.py:setup_enclave()` / `create_enclave()` / `launch_enclave()` | Update arguments/call sites. Resolve create configuration and check implemented type support before bundle lookup or host changes; pass launch's optional selector unchanged. Preserve override precedence and error translation. |
+| `_image_builder.py:_dependencies()` | Read required artifacts and expected bundle schema/profile from typed configuration. Enforce bundle/architecture/recipe agreement. Preserve bundle schema-1 validation, all supplied-artifact hashes, containment, safe extraction, and executable checks. |
+| `_image_builder.py:build_igvm()` | Accept configuration; gate debug/measurement/signing, validate the recipe/layout, and apply CLI-owned settings to its private copy. Check final platform identity before publication, including signed output. Preserve initrd composition and build/publication/cleanup behavior. |
+| `_setup.py:setup_host()` | Consume backend/device requirements through existing checks. Preserve root/Azure Linux restrictions, confirmation, bounded installation, and runtime verification; add no probes, kernel changes, or reboot behavior. |
+| `_rpc.py:create_request()` | Map resolved resource/device settings into existing protobuf fields. Keep explicit SNP oneof and boot-enum serialization: absent isolation must not silently mean non-confidential launch. Leave `VmClient` unchanged. |
+| `_lifecycle.py:launch()` | Inspect/select the platform and validate resolved configuration, implemented type support, and host requirements before instance creation/startup. Pass configuration to RPC and type to readiness; write initial state as specified in section 5. |
+| `_lifecycle.py:probe_guest()` | Guard the SNP exchange/parser by type. Preserve deadlines, response retention, and the non-verification warning. |
+| `_lifecycle.py:destroy()` | Validate schema-2 identity/settings and use saved configuration independently of image/manifest availability. Preserve shutdown/recovery; see section 5. |
+| `custom.py:_instance_result()` | Filter new internal provenance/configuration fields deliberately; preserve existing public output and ownership filtering. |
+| **Extension root `setup.py`** | Package `manifests/*.json`; verify installed-wheel lookup. Add a dependency only if required by the chosen reader. |
+| `_help.py`; **root `README.rst`, `HISTORY.rst`** | Document selection rules, defaults, compatibility changes, and examples with current workspace requirements. |
+| `tests/latest/` | Add focused manifest/header/selection tests and extend existing command/build/setup/RPC/readiness/lifecycle tests; see section 6. Replace placeholder image bytes where real header validation now applies. |
 
-Artifact requirements are type-specific. Keep isolation type, architecture,
-and boot mode separate; supporting a type does not support every combination.
+Keep genuine SNP implementations: `_snp_measurement()`, `_sign_igvm()`,
+`snp_linux_direct`/`snp_bootshim` mapping, SNP protobuf selection, and report
+validation. Guard them; do not rename them into supposedly universal handlers.
 
-## 3. Proposed selection and isolation manifests
+Leave `commands.py`, `_worker.py`, and `_instance.py` ownership/permissions/locks
+unchanged. Preserve runtime package/integrity checks, generated protobufs,
+protocol pins, paths, endpoint descriptions, and the single-runtime host guard.
 
-### CLI selection
+## 3. CLI and image platform selection
+
+| Command | `--isolation-type` behavior |
+| --- | --- |
+| `create` | Required, no default; reject omission/unsupported values before side effects. |
+| `launch` | Optional, no default; omission requests discovery, not SNP. An explicit value selects an image-declared platform, not an override. |
+| `destroy` | No selector; use validated persisted identity. |
 
 ```bash
-# Explicit SNP selection with packaged dependencies
-az enclave create --isolation-type snp --output-file ./image.igvm
-
-# Setup also requires explicit isolation selection
-az enclave setup --isolation-type snp
-
-# Explicit type and customer bundle
 az enclave create --isolation-type snp \
-    --dependency-bundle ./custom-dependencies.tar.gz \
-    --output-file ./image.igvm
+    --workspace ./build --output-file ./image.igvm
+
+# Auto-select a single-platform image
+az enclave launch --name demo --igvm ./image.igvm
+
+# Select explicitly; required when the image declares multiple platforms
+az enclave launch --name demo-selected --igvm ./image.igvm \
+    --isolation-type snp
 ```
 
-Require `--isolation-type` for create and setup, with no implicit default.
-Omission is an argument error before side effects; existing callers must add
-`--isolation-type snp`. Launch still reads isolation from the image using
-NEW_DESIGN's embedded-settings and legacy compatibility rules, not a CLI
-isolation override.
+In `_igvm.py`, read standard
+[`IGVM_VHS_SUPPORTED_PLATFORM`](https://docs.rs/igvm_defs/latest/igvm_defs/struct.IGVM_VHS_SUPPORTED_PLATFORM.html)
+headers. Their
+[`platform_type`](https://docs.rs/igvm_defs/latest/igvm_defs/struct.IgvmPlatformType.html)
+declares compatible platforms, such as `SEV_SNP`, `TDX`, or `NATIVE`, not the
+user's preferred mode. Map recognized platform identifiers explicitly; recognizing
+TDX for errors/ambiguity does not enable TDX launch.
 
-Retain the existing archive-or-directory `--dependency-bundle` override.
-An override replaces the
-packaged dependency source, not individual missing artifacts: never silently
-mix incomplete customer inputs with packaged defaults.
+| Image / request | Result |
+| --- | --- |
+| One declared platform; no selector | Select it, then require enabled extension/backend support. |
+| Multiple platforms; no selector | Reject and require selection. Count entries before filtering by host capability or enabled types. |
+| Explicit selector matches one entry | Validate that entry's version/VTL, manifest, backend, and implemented type support. |
+| Selector is absent from the image | Reject; report the request and declared platforms. |
+| Multiple variants remain for the selected type | Reject as ambiguous; a type-only selector cannot distinguish them. |
+| Disabled/unimplemented selected type | Reject; never substitute SNP or non-confidential isolation. |
+| Missing entries, malformed headers, unsupported format, or bad checksum | Reject even with an explicit selector. Never fall back to assumed SNP. |
 
-Only `snp` is selectable. Reject unknown, disabled, or unimplemented types
-before dependency lookup, generation, setup changes, or RPC calls; never
-substitute SNP. Customer bundles must satisfy the selected type's full artifact
-contract. Preserve schema-1 path, hash, artifact, and configuration validation;
-no generalized bundle schema is required now.
+Reader requirements:
 
-### Manifest directory and ownership
+- Support reviewed versions compatible with the pinned generator. Validate
+  magic, file size, header bounds/lengths/alignment/padding/checksum, platform
+  entry structure/order, and distinct single-bit compatibility masks.
+- Honor required/optional header rules: reject unsupported required structures
+  and safely skip valid optional ones. Keep inspection bounded and read-only;
+  no string scanning, dependency downloads, or image-selected executables.
+- Return the selected compatibility mask.
+- Establish explicit accepted platform-version/VTL combinations from pinned
+  artifacts and runtime support, and enforce them in Python; recognition alone
+  does not establish support.
 
-Follow the organization of OpenVMM's
-[`vm/loader/manifests`](https://github.com/microsoft/openvmm/tree/main/vm/loader/manifests):
-keep reviewed JSON configuration files in a dedicated directory. Proposed
-extension layout:
+**Runtime-selection gate:** the RPC sends SNP isolation, not a compatibility
+mask. Verify that the pinned runtime uses this to load the intended platform's
+content. Accept multi-platform images only where this behavior is demonstrated;
+otherwise reject them. Do not expand runtime/protocol scope to bypass this gate.
+
+The launch flow is:
 
 ```text
-azext_enclave/
-    manifests/
-        snp.json
+IGVM headers + optional selector -> validated platform -> packaged manifest
+    -> supported configuration + shared Python policy/wiring -> existing launch flow
 ```
 
-Use an explicit mapping of supported type identifiers to packaged files, not
-user-supplied paths or directory enumeration. Add another type's manifest only
-with validated code, artifacts, runtime, and host support.
+Create validates recipe compatibility before generation. Launch validates
+inspectable image structure/platforms, but an SNP header does not prove boot,
+resources, devices, application protocol, publisher authenticity, or attestation.
+Do not claim complete pre-launch compatibility checks for external images:
+reject detectable incompatibilities early and report runtime/readiness failures
+explicitly. This is not a general-purpose IGVM launcher.
 
-OpenVMM's files are **generator recipes**; the proposed JSON is **CLI isolation
-metadata** with a separate schema. Keep the bundle's generator recipe as an
-input and apply validated CLI settings to a private copy during create.
-Do not pass CLI-only metadata directly to `igvmfilegen`.
+## 4. Manifest contract and example
 
-| Component | Owned by | Responsibility |
-| --- | --- | --- |
-| Packaged isolation manifest | Reviewed extension metadata | Versioned identity, supported architecture/boot/layout, required logical artifacts, resource defaults/validated constraints, device settings, host requirements, and operation capabilities. Same source for NEW_DESIGN create and launch. |
-| Existing dependency-bundle index and generator manifest | Repository bundle or compatible customer override | Artifact paths/hashes and IGVM generation inputs. Preserve existing schema-1 SNP validation; no bundle migration or automatic replacement of application/init defaults. |
-| Existing CLI modules | Reviewed Python code | Validate manifest data, enforce support checks, map settings to generator/RPC fields, and perform measurement, signing, host checks, readiness, and shared lifecycle operations. |
+Package `azext_enclave/manifests/snp.json` through the existing wheel resource
+mechanism, with one manifest per enabled type. This is proposed extension
+metadata, not an implemented schema or an `igvmfilegen` recipe.
 
-### Settings and operation checks
+```json
+{
+  "schema_version": 1,
+  "isolation_type": "snp",
+  "supported_configuration": {
+    "architecture": "x86_64",
+    "boot_mode": "linux_direct",
+    "device_layout": "measured-pcie-v1"
+  },
+  "dependency_bundle": {
+    "schema_version": 1,
+    "profile": "measured-pcie-v1",
+    "required_artifacts": [
+      "kernel", "base_initrd", "snp_bootshim", "igvmfilegen", "igvm_manifest"
+    ]
+  },
+  "defaults": {
+    "processor_count": 1,
+    "memory_mib": 160
+  },
+  "runtime": {
+    "backend": "mshv",
+    "disable_vmbus": true,
+    "disable_hv": false
+  },
+  "devices": {
+    "serial": {"port": 0},
+    "pcie": {
+      "segment": 0,
+      "start_bus": 0,
+      "end_bus": 1,
+      "ecam_base": 4141875200,
+      "low_mmio_base": 4143972352,
+      "low_mmio_size": 16777216,
+      "high_mmio_base": 4294967296,
+      "high_mmio_size": 1048576
+    }
+  },
+  "host_requirements": {
+    "character_devices": ["/dev/mshv"]
+  }
+}
+```
 
-Define and validate a versioned schema before consumption. Load each manifest
-into a typed validated representation; reject missing required fields, malformed
-values, unsupported versions, contradictory settings, and unknown operation
-identifiers. Preserve today's SNP defaults in this single source: x86-64,
-Linux-direct, one processor, 160 MiB, and the current supported device layout.
-Do not invent CPU/memory limits before owner validation.
+### Manifest properties
 
-Keep defaults separate from fixed constraints and supported operations. Declare
-capabilities for concrete behavior such as SNP guest-debug policy, SNP ID-block
-signing, SNP measurement parsing, and the current SNP readiness/report exchange.
-Existing code checks the selected type and capability before invoking that
-operation. For example, an unsupported `--signing-key` request fails before
-generation; it never silently produces an unsigned image.
+Object sections group related settings; each value below has a distinct role.
 
-An enabled type needs implemented create/setup/launch/readiness behavior.
-Reject requests for unsupported optional operations; never run SNP code for a
-different type. Keep ownership, locks, supervision, logs, and teardown shared.
-
-Manifests and bundle metadata must not load arbitrary Python modules, name
-unrestricted executables, or supply unchecked host command templates.
-Existing trust requirements for executing a bundled generator still apply;
-artifact hashes detect mismatches but do not authenticate a publisher.
-
-## 4. Packaging and dependency delivery
-
-Package isolation JSON through the existing wheel resource mechanism, alongside
-unchanged dependency/application/init defaults. Validate installed-wheel lookup;
-do not depend on repository-relative paths at runtime.
-
-Keep schema-1 SNP bundle consumption unchanged. Declare the `snp_bootshim`
-requirement in `snp.json` and enforce it in the existing bundle-validation code.
-Preserve indexed paths, containment, safe extraction, and integrity validation.
-Version any future bundle contract separately from the isolation manifest.
-
-External retrieval/assembly and default migration remain deferred until delivery
-details are confirmed. Then follow NEW_DESIGN proposal 1's candidate assembly
-and validation gates. Do not fetch or compile dependencies during create/setup,
-or download during metadata inspection or customer installation.
-
-## 5. Required CLI manifest integration
-
-| Area | Required change |
+| Property | Why it belongs in the manifest |
 | --- | --- |
-| Argument handling | Require `--isolation-type` for create and setup with no default. Allow only SNP; reject missing/unknown/disabled selections before side effects. |
-| Create validation | Load the packaged manifest and use its required artifacts/configuration constraints in existing bundle validation and generator mapping. Preserve validation/results and the schema-1 contract. |
-| Image composition | Keep rootfs/initrd composition in place. Apply validated manifest settings to private generator inputs; preserve application/init and workspace behavior and integrate NEW_DESIGN options separately. |
-| Default application/init | Keep today's provided defaults and explicit override precedence. Manifest requirements must not let a dependency-bundle override implicitly replace application/init. |
-| Debug settings | Check support before applying the existing SNP guest-debug mapping in place. Preserve global `--debug` for CLI diagnostics; it is not a guest security policy. |
-| Measurements | Check the supported measurement format and keep existing SNP parsing/output. Implement other formats only when supported; never label another type's result as SNP. |
-| Signing | Check SNP ID-block signing capability before invoking existing signing code. Preserve `--signing-key` behavior, fail on unsupported requests/signing errors, and never publish an unsigned fallback. |
-| Setup | Read declarative host/backend requirements and apply supported checks in existing setup code. Retain bounded installation behavior; do not change kernels, reboot, or fetch image dependencies. |
-| Launch | Use validated manifest defaults/device settings in existing RPC mapping; retain the SNP serialization check and current schema. Integrate NEW_DESIGN's embedded image identity/settings separately; never take a launch isolation override or regenerate the image. |
-| Worker/supervisor | Keep process ownership, serial collection, logs, locks, and child reaping shared. Pass only validated configuration needed by the runtime; do not move CLI validation into arbitrary bundle-driven worker behavior. |
-| Readiness/evidence | Check support for the selected type's exchange/report format before using the existing SNP probe. Preserve today's readiness requirements; a future type needs a real compatible probe, not an SNP-shaped fallback. Collection is not cryptographic verification. |
-| Instance state/status | Keep ownership and liveness handling shared. Record resolved type/configuration identity for new records without invalidating existing SNP records; preserve existing fields and command output. Integrate the proposed status command separately. |
-| Destroy | Preserve shared RPC shutdown and owned-process recovery. Validate persisted isolation identity; treat valid legacy records explicitly as SNP, not as whichever type later becomes the default. Reject corrupt/unknown identities. |
-| Cleanup | Keep confirmed shutdown, removal, and log-only archival independent of isolation. Integrate NEW_DESIGN's automatic cleanup contract separately; no per-type cleanup implementation or dry-run/opt-in cleanup flag. |
+| `schema_version` | Versions this extension metadata so the loader can reject formats it does not understand. |
+| `isolation_type` | Identifies the configuration as SNP and lets the loader check agreement with the requested or image-declared type. |
+| `supported_configuration.architecture` | Defines the supported guest architecture so bundle, recipe, and inspectable image properties can be checked consistently. |
+| `supported_configuration.boot_mode` | Defines the supported boot method and its mapping to the runtime's boot-personality field. |
+| `supported_configuration.device_layout` | Names the supported image/device contract. This layout is fixed for our SNP implementation, not required by SNP generally. |
+| `dependency_bundle.schema_version` | Specifies the bundle-index format accepted for this configuration, independently of the extension metadata version. |
+| `dependency_bundle.profile` | Identifies the expected bundle compatibility contract so incompatible bundles can be rejected. It is not another user selector. |
+| `dependency_bundle.required_artifacts` | Lists the inputs that must be present before generation, including CLI packaging inputs beyond the generator's own resources. The bundle cannot weaken this list. |
+| `defaults.processor_count` | Provides the shared CPU-count default for image creation and launch rather than defining it independently in each path. |
+| `defaults.memory_mib` | Provides the shared guest-memory default for image creation and launch. |
+| `runtime.backend` | Identifies the backend this configuration requires so launch can check implementation/host compatibility. It does not introduce a new worker argument. |
+| `runtime.disable_vmbus` | Specifies whether the supported configuration runs without VMBus, keeping that choice out of hardcoded RPC construction. |
+| `runtime.disable_hv` | Specifies whether Hyper-V enlightenments are disabled; the current `false` value preserves them. This is separate from disabling VMBus. |
+| `devices.serial.port` | Selects the guest serial port expected by this configuration while Python retains host connection wiring. |
+| `devices.pcie.segment` | Identifies the PCI segment that must agree between the measured layout and runtime configuration. |
+| `devices.pcie.start_bus` | Defines the lowest valid PCI bus number for the supported root complex. |
+| `devices.pcie.end_bus` | Defines the highest valid PCI bus number for the supported root complex. |
+| `devices.pcie.ecam_base` | Records the PCI configuration-space base expected by the measured recipe so layout compatibility can be checked. |
+| `devices.pcie.low_mmio_base` | Fixes the starting address of the low MMIO window so the recipe and runtime use the same address map. |
+| `devices.pcie.low_mmio_size` | Defines the low MMIO window's extent for layout validation and runtime mapping. |
+| `devices.pcie.high_mmio_base` | Fixes the starting address of the high MMIO window so the recipe and runtime use the same address map. |
+| `devices.pcie.high_mmio_size` | Defines the high MMIO window's extent for layout validation and runtime mapping. |
+| `host_requirements.character_devices` | Declares required host interfaces such as `/dev/mshv`; launch checks these using existing Python validation. |
 
-Preserve current paths and the single-runtime host guard until NEW_DESIGN's
-path/workspace changes ship. Do not introduce per-type roots or concurrent
-runtimes.
+### Implementation rules
 
-### Embedded image settings and backward compatibility
-
-NEW_DESIGN proposal 2 can ship separately for SNP, but must be integrated before
-enabling another isolation type:
-
-The packaged manifest supplies per-type defaults/constraints, not per-image
-choices. Create stores effective identity/configuration/resources in supported
-IGVM fields or agreed embedded metadata before measurement/signing. Confirm
-writer/reader semantics with owners; parameter bounds may not encode choices.
-
-Launch validates saved image settings against the packaged manifest and maps
-them to RPC without rewriting the image or requiring companion JSON. Save
-identity, effective settings, manifest/default provenance, and image hash in
-instance state; a hash is not publisher authentication or attestation.
-
-For missing fields, use NEW_DESIGN's explicit warnings and packaged defaults;
-missing isolation identity uses SNP compatibility, not a future default.
-Malformed, contradictory, or unsupported values fail. Defaults cannot recover
-lost custom choices or guarantee boot. Non-SNP customer images need validated
-embedded identity/settings; never infer type from filenames. Interpret valid
-legacy instance records as SNP; report corrupt/unknown identity explicitly.
-
-## 6. Potential issues and constraints
-
-| Issue | Impact and handling |
+| Contract | Implementation rule |
 | --- | --- |
-| Configuration drift | Validate manifest/image/state boundaries; never downgrade unsupported selections or fill incomplete customer bundles from defaults. |
-| Excessive refactoring | Keep existing modules and extract only reusable helpers; no profile hierarchy, plugins, or duplicated lifecycle. |
-| Compatibility regression | Preserve bundle schema, runtime pins, output, and legacy state interpretation. Version isolation metadata separately. |
-| Signing/debug ambiguity | Check guest-operation support explicitly; preserve CLI `--debug` semantics and never substitute an unsigned image. |
-| Metadata mistaken for support | Customer bundles cannot replace packaged capabilities, supply host commands, or enable missing RPC/readiness implementations. |
+| Field mappings and units | Map manifest architecture `x86_64` to recipe `x64`; serial port 0 means COM1. Memory is in MiB and MMIO/ECAM values are bytes. Map `low_mmio_size`/`high_mmio_size` to RPC `low_mmio`/`high_mmio`; ECAM has no new pinned RPC field. |
+| Ownership boundaries | The bundle index owns supplied artifact paths/hashes; the recipe owns SNP policy/boot details. Validate agreement and apply CLI-owned settings to a private recipe copy; never pass this entire manifest to `igvmfilegen`. |
+| Host policy | Keep the Azure Linux installer restriction in Python and runtime pins in `_runtime.py`, not in this configuration. |
+| Shared behavior and wiring | Python retains type guards, disabled guest-debug default, serial `connect=True`, readiness port 4050, names `vsock`/`rc0`, and generated per-run paths/ownership. These are not isolation-specific configuration. |
 
-## 7. Suggested implementation sequence and acceptance criteria
+### OpenVMM manifest recipe
 
-1. **Package and validate `snp.json`.** Define the versioned schema, supported-type
-   mapping, and installed-resource lookup using current settings and requirements.
-2. **Wire selection and compatibility.** Require create/setup `--isolation-type`
-   with no default, reject missing/unsupported selections before side effects, and persist
-   identity without invalidating valid legacy SNP records.
-3. **Consume settings and guard operations in place.** Update existing
-   bundle/generator/RPC code and add signing, guest-debug, measurement, setup,
-   and readiness checks; keep shared lifecycle code unchanged.
-4. **Run focused regression checks.** Cover missing required isolation arguments,
-   schema/version errors, missing
-   packaged files, unsupported operations before side effects, default/customer
-   bundles, independent app/init overrides, signing/debug/measurements, RPC
-   serialization, old/new state, host checks, ownership, and teardown failures.
-   Run existing protocol checks and documented linters/tests; verify ordinary
-   builds and installed commands do not retrieve dependencies.
-5. **Verify SNP end to end.** On a supported host, validate creation, boot,
-   readiness/evidence, shutdown, and cleanup with unchanged resources/runtime.
-   Record the environment; test doubles do not establish real backend support.
+OpenVMM's
+[`vm/loader/manifests`](https://github.com/microsoft/openvmm/tree/main/vm/loader/manifests)
+contains build recipes consumed by `igvmfilegen`. For example,
+[`snp-linux-direct.json`](https://github.com/microsoft/openvmm/blob/main/vm/loader/manifests/snp-linux-direct.json)
+describes how to construct an SNP Linux-direct image.
 
-Completion means manifest-backed settings and operation checks preserve SNP
-behavior without reorganizing the modules. TDX/non-confidential boot, external
-dependency migration, and separate NEW_DESIGN features are not required.
+A separate, generated resources JSON maps kernel/initrd/bootshim names to
+absolute paths; it does not declare requirements or hashes. OpenVMM's Rust
+[`required_resources()`](https://github.com/microsoft/openvmm/blob/main/vm/loader/igvmfilegen_config/src/lib.rs)
+derives required generator resources from the recipe, and `check_required()`
+validates their presence. Build tooling supplies the binaries; launch arguments
+and runtime code supply CPU/RAM, backend, and device configuration.
+
+**Our schema centralizes isolation-specific settings across create/launch**,
+including packaging inputs (generator, recipe, base initrd), launch settings,
+and host requirements. Unlike OpenVMM's build-only recipe, it
+serves both CLI flows. Continue passing the separate recipe and generated
+`resources.json` to `igvmfilegen`. Keep its resource validation without Rust
+bindings or a duplicate resolver; bundles cannot weaken packaged requirements.
+
+The [upstream README](https://github.com/microsoft/openvmm/blob/main/vm/loader/manifests/README.md)
+describes host-device-tree-driven topology. Our pinned `measured-pcie-v1` recipe
+instead includes `processor_count` and measured `pcie_host_bridge` fields.
+Preserve that contract; do not adopt upstream runtime behavior or infer saved
+customer resource choices from generator memory fields in this refactor.
+
+## 5. Behavior and state requirements
+
+- **Inputs:** Keep packaged application/init defaults and explicit override
+  precedence. A customer dependency archive/directory replaces that source only;
+  never mix missing artifacts with packaged defaults or rewrite an incompatible
+  recipe to appear supported. Hashes detect mismatches, not trusted publishers.
+- **Debug/signing/evidence:** Preserve today's global `--debug` to SNP guest-debug
+  mapping and warning, measurement output, and `--signing-key` behavior. Reject
+  unsupported operations early; signing failures never publish unsigned fallback
+  images. Keep report-shape checks, not claims of attestation verification.
+- **Images:** Compatible SNP images need no new metadata/rebuild. Launch uses
+  manifest CPU/memory defaults until proposal 2; these cannot recover custom
+  choices or guarantee boot.
+- **State:** Write instance schema 2 in the initial `starting` record: type,
+  platform version/VTL/mask, selection source, effective settings, manifest
+  provenance, and image hash. Reject older, unknown, corrupt, or incomplete
+  records without migration. Destroy uses saved settings without needing the
+  image or current manifest. Preserve ownership, liveness, output, rollback,
+  shutdown, and retention. Destroy development instances with their original
+  CLI before upgrading; do not discard records for running instances.
+
+## 6. Implementation validation
+
+Add focused tests in each phase. Manifest and reader work can progress
+independently after step 1; CLI/lifecycle integration depends on both.
+
+| Test location | Required coverage |
+| --- | --- |
+| New `tests/latest/test_isolation.py` | Missing/invalid/versioned manifests, invalid dependency declarations, contradictory settings, disabled types, and packaged-resource lookup. |
+| New `tests/latest/test_igvm.py` | Real pinned unsigned/signed headers; malformed/truncated/unsupported headers, bounds/alignment/padding/checksum/masks, required/optional structures, missing platforms, auto/explicit match, mismatch, multi-platform ambiguity, and duplicate variants. Do not select SNP just because it is the only enabled type. |
+| Existing `test_commands.py`, `test_create.py`, `test_setup.py` | Required/optional argument behavior, rejection before side effects, complete default/customer bundles, missing packaging inputs, unsupported recipes, independent app/init overrides, type guards for debug/measurement/signing, platform checks, publication/cleanup, and unchanged setup behavior. |
+| Existing `test_rpc.py`, `test_guest_probe.py`, `test_lifecycle.py` | Unchanged SNP serialization/resources/devices/evidence, readiness type guards, and shared serial/vsock wiring; complete schema-2 state before startup, rejection of older/partial/corrupt records, destroy independent of image/manifest availability or updates, endpoints, ownership, rollback, and teardown failures. |
+| Installed wheel and supported host | Load resources without repository-relative paths or downloads. Verify automatic and explicit SNP launch plus readiness/destroy, recording OS/kernel/runtime/bundle identity. Test representative multi-platform runtime selection; reject/document cases not demonstrably supported. |
+
+Run relevant existing unit tests, `azdev style enclave --pep8`, and
+`python scripts/generate_protocol.py --check` using the README's pinned protocol
+environment. Use the existing wheel workflow; add no test tooling solely for
+this refactor. Doubles do not establish backend boot support. Reader delivery,
+runtime selection, and host availability are the main estimate risks.
