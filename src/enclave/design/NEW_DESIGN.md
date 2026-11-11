@@ -180,7 +180,7 @@ Save identity, effective settings, image/default provenance, and final image
 hash for status. A hash does not prove configuration, publisher authenticity,
 or attestation.
 
-Return the persisted `run_id` with the name and effective settings in launch's
+Return the enclave name and effective settings in launch's
 structured result, using proposal 5's lifecycle identity. Expose it in readable
 launch output as well, so callers can record it before destroy.
 
@@ -272,23 +272,34 @@ or a purge of backups, external collectors, or Azure CLI diagnostics.
 
 #### Archive location, contents, and retention
 
-Use `/var/log/enclave/<name>/<run-id>/` for completed-run diagnostics, separate
+Use `/var/log/enclave/<full-name>/` for completed-run diagnostics, separate
 from operational state under `/var/lib`. Archive only the three log sources
 in proposal 7: `com1.log`, `openvmm.log`, and `supervisor.log`, when available.
-The archive path identifies the enclave name and run ID; do not add an archive
+The archive path identifies the unique full enclave name; do not add an archive
 manifest or state snapshots. Exclude `instance.json`, `runtime.json`,
 `worker-error.json`, `response.json`, sockets, locks, and external images/inputs.
 Archived logs are historical diagnostics, not live ownership or verified
 attestation.
 
-Assign/persist a unique immutable `run_id` when creating instance state at
-launch, before starting runtime processes; it identifies one lifecycle, not
-the reusable enclave name or image. Return it from launch, status, and destroy,
-and use it in the archive directory path. Lifecycle recovery and destroy
-retries reuse it; a new launch after removal gets a new ID even with the same
-name and image. Report it on launch failure when instance state was persisted,
-so the retained failed run can be inspected. Never overwrite/adopt another run's
-archive. Keep active logs in instance directories until writers exit.
+On launch, replace `--name` with optional `--name-prefix`, defaulting to
+`enclave`. Validate the prefix at the beginning, before creating instance state
+or starting runtime processes: require 1-24 ASCII letters, digits, underscores,
+or hyphens, starting with a letter or digit; reject invalid input with an
+actionable error. Append a freshly generated standard 36-character GUID,
+separated by a hyphen, to form the unique immutable full name
+`<name-prefix>-<guid>` (for example, `enclave-<guid>`). Generate and persist this
+full name when creating instance state, before starting runtime processes.
+Return the full name from launch, status, and destroy, including launch failure
+when instance state was persisted. Subsequent status, destroy, and diagnostics
+commands use `--name <full-name>`; do not resolve prefixes implicitly.
+Lifecycle recovery and destroy retries reuse the full name; every new launch
+generates a fresh GUID even with the same prefix and image. Use
+`/var/lib/enclave/instances/<full-name>/` for state and active runtime sockets,
+and `/var/log/enclave/<full-name>/` for archived logs. The 24-character prefix
+cap keeps current Unix socket paths within Linux's pathname limit with some
+headroom; validate any future socket filenames against that limit. Never
+overwrite/adopt another lifecycle's state or archive. Keep active logs in
+instance directories until writers exit.
 
 Archives remain root-owned/private with regular-file/no-symlink validation:
 logs may contain secrets. Keep them until explicit administrator removal, never
@@ -655,9 +666,6 @@ workspace parent, and any published final IGVM, and reports cleanup failures.
 | Parameter | Description |
 | --- | --- |
 | `--workspace` | Becomes optional. Default: a private temporary directory using Python's temp-location policy, normally `/tmp` on Linux and honoring `TMPDIR`. Explicit paths select the build parent. |
-
-Remove `--keep-intermediates`; build intermediates are CLI-managed, not
-customer-facing outputs. An explicit workspace changes location, not retention.
 
 #### Examples
 
