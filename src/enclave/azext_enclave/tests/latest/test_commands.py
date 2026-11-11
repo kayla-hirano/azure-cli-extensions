@@ -35,7 +35,7 @@ class EnclaveCommandTest(unittest.TestCase):
         expected = {
             'enclave setup': {'yes'},
             'enclave create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
-                               'output_file', 'signing_key'},
+                               'output_file', 'signing_key', 'keep_intermediates'},
             'enclave launch': {'name', 'igvm', 'openvmm', 'timeout', 'allow_untested_runtime'},
             'enclave destroy': {'name', 'timeout'},
         }

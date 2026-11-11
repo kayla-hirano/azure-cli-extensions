@@ -38,7 +38,7 @@ class IgvmBuildResult(NamedTuple):
 
 
 class IgvmBuildError(RuntimeError):
-    """A failed build stage, with a residual workspace when cleanup fails."""
+    """A failed build stage, with a retained or residual workspace when available."""
 
     def __init__(
         self,
@@ -398,20 +398,20 @@ def _validate_generated_image(image: Path, stage: str, *, signed: bool = False) 
 
 
 def _cleanup_build(work: Optional[Path], staged_output: Optional[Path]) -> None:
-    """Attempt both removals, reporting every residual path without hiding the build error."""
+    """Remove staging first, retaining the workspace if either cleanup fails."""
     errors = []
     try:
         if staged_output is not None:
             staged_output.unlink()
     except OSError as error:
         errors.append("Cannot remove publication staging file {}: {}".format(staged_output, error))
-    try:
-        if work is not None:
+    if not errors and work is not None:
+        try:
             shutil.rmtree(work)
-    except OSError as error:
-        errors.append("Cannot remove build workspace {}: {}".format(work, error))
-    else:
-        work = None
+        except OSError as error:
+            errors.append("Cannot remove build workspace {}: {}".format(work, error))
+        else:
+            work = None
     if errors:
         raise IgvmBuildError("Cleanup failed: " + "\n".join(errors), stage="cleanup", workspace=work)
 
@@ -424,6 +424,7 @@ def build_igvm(
     output: Path,
     workspace: Optional[Path] = None,
     signing_key: Optional[Path] = None,
+    keep_intermediates: bool = False,
     enable_debug: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> IgvmBuildResult:
@@ -451,9 +452,12 @@ def build_igvm(
 
     A private directory under ``workspace`` (or Python's temporary location
     when omitted) holds rootfs, initrd, generator sidecars, resources, and stage
-    logs. It is removed on success/failure. If cleanup fails, the residual
-    directory is exposed through IgvmBuildError.workspace. Timestamps follow
-    SOURCE_DATE_EPOCH, defaulting to zero as in the existing packaging script.
+    logs. Failures and interruptions retain this directory automatically;
+    ``keep_intermediates=True`` also retains it on success. Retained failure
+    directories are exposed through IgvmBuildError.workspace. Validation
+    failures before workspace creation have no directory to retain.
+    Timestamps follow SOURCE_DATE_EPOCH, defaulting to zero as in the existing
+    packaging script.
 
     An optional caller-configured ``logger`` receives INFO progress and DEBUG
     log paths. Tool output stays in stage files; no handlers are installed.
@@ -548,12 +552,6 @@ def build_igvm(
             with generated.open("rb") as source:
                 shutil.copyfileobj(source, destination)
         staged_output.chmod(0o644)
-        stage = "cleanup"
-        if logger is not None:
-            logger.info("Removing build workspace")
-        shutil.rmtree(work)
-        work = None
-        stage = "publish"
         # link() fails if another caller published this output meanwhile.
         os.link(staged_output, result)
         if logger is not None:
@@ -561,25 +559,35 @@ def build_igvm(
         return IgvmBuildResult(result, measurements)
     except IgvmBuildError as error:
         failure = error
+        error.workspace = work
         raise
     except (OSError, ValueError, UnicodeError, struct.error, tarfile.TarError) as error:
         detail = str(error)
         if isinstance(error, OSError) and error.errno in (
                 errno.ENOSPC, errno.EDQUOT, errno.EACCES, errno.ENOEXEC, errno.EROFS):
             detail += "\nCheck build storage space, permissions and execution support; select another --workspace."
-        failure = IgvmBuildError(detail, stage=stage)
+        failure = IgvmBuildError(detail, stage=stage, workspace=work)
         raise failure from error
     except BaseException as error:
         failure = error
         raise
     finally:
+        retain_work = keep_intermediates or failure is not None
         try:
-            _cleanup_build(work, staged_output)
+            if not retain_work and work is not None and logger is not None:
+                logger.info("Removing build workspace")
+            _cleanup_build(None if retain_work else work, staged_output)
         except IgvmBuildError as error:
+            retain_work = True
+            error.workspace = work
             if failure is None:
                 raise
             failure.args = ("{}\n{}".format(failure, error),)
             if isinstance(failure, IgvmBuildError):
-                failure.workspace = error.workspace
+                failure.workspace = error.workspace or failure.workspace
             elif logger is not None:
                 logger.error("%s", error)
+        finally:
+            if retain_work and work is not None:
+                (logger if logger is not None else logging.getLogger(__name__)).warning(
+                    "Build workspace retained at: %s", work)
