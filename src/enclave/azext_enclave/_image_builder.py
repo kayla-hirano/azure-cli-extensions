@@ -169,7 +169,8 @@ def _dependencies(bundle: Path) -> Dict[str, Path]:
         paths[name] = path
 
     if not os.access(paths["igvmfilegen"], os.X_OK):
-        raise ValueError("Dependency igvmfilegen is not executable; check file permissions")
+        raise ValueError(
+            "Dependency igvmfilegen is not executable; check file permissions or select another --workspace.")
     config = _read_json(paths["igvm_manifest"])
     guests = config.get("guest_configs")
     if (config.get("guest_arch") != "x64"
