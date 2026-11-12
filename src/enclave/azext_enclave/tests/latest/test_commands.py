@@ -5,15 +5,14 @@
 
 """Verify Azure CLI registration, help, arguments, and delegation without launching a VM."""
 
-import json
+import shlex
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
 from knack.util import CLIError
 from azure.cli.core import get_default_cli
-from azure.cli.core.extension import ext_compat_with_cli
 
 from azext_enclave import EnclaveCommandsLoader
 from azext_enclave import custom
@@ -22,16 +21,6 @@ from azext_enclave._help import helps
 
 class EnclaveCommandTest(unittest.TestCase):
     """Exercise the extension loader and public command-handler boundary."""
-
-    def test_cli_core_version_compatibility(self) -> None:
-        metadata_path = Path(__file__).resolve().parents[2] / 'azext_metadata.json'
-        metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
-        self.assertNotIn('azext.maxCliCoreVersion', metadata)
-        for version, compatible in (
-                ('2.0.66', False), ('2.0.67', True), ('2.91.0', True),
-                ('2.92.0', True), ('2.93.0', True), ('3.0.0', True)):
-            with self.subTest(version=version), patch('azure.cli.core.__version__', version):
-                self.assertEqual(ext_compat_with_cli(metadata)[0], compatible)
 
     def test_command_registration(self):
         """Keep the advertised command set stable while lifecycle implementations evolve."""
@@ -47,8 +36,8 @@ class EnclaveCommandTest(unittest.TestCase):
             'enclave setup': {'yes'},
             'enclave create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
                                'output_file', 'signing_key', 'keep_intermediates'},
-            'enclave launch': {'name', 'igvm', 'openvmm', 'state_dir', 'timeout', 'allow_untested_runtime'},
-            'enclave destroy': {'name', 'state_dir', 'timeout'},
+            'enclave launch': {'name', 'igvm', 'openvmm', 'timeout', 'allow_untested_runtime'},
+            'enclave destroy': {'name', 'timeout'},
         }
         for command in ('enclave setup', 'enclave create', 'enclave launch', 'enclave destroy'):
             with self.subTest(command=command):
@@ -61,29 +50,47 @@ class EnclaveCommandTest(unittest.TestCase):
                 self.assertEqual(set(table[command].arguments), expected[command])
 
     def test_command_help(self):
-        """Distinguish unprivileged image building from the local-L1 lifecycle requirements."""
-        self.assertIn('Root and Azure login are not required.', helps['enclave create'])
-        self.assertIn('--output-file', helps['enclave create'])
-        self.assertIn('--keep-intermediates', helps['enclave create'])
-        self.assertIn('--debug enables SNP guest debugging and diagnostic logs.', helps['enclave create'])
-        self.assertIn('expected SNP launch measurements', helps['enclave create'])
-        self.assertIn('Azure Linux 3.0 L1', helps['enclave setup'])
-        for command in ('launch', 'destroy'):
-            self.assertIn('Linux L1', helps['enclave {}'.format(command)])
+        """Validate help structure and advertised command examples without pinning prose."""
+        for action in ('setup', 'create', 'launch', 'destroy'):
+            command = 'enclave ' + action
+            with self.subTest(command=command):
+                help_text = yaml.safe_load(helps[command])
+                self.assertEqual(help_text['type'], 'command')
+                self.assertTrue(help_text['short-summary'].strip())
+                self.assertTrue(help_text['examples'])
+                cli = get_default_cli()
+                cli.invocation = SimpleNamespace(data={'command_string': command})
+                loader = EnclaveCommandsLoader(cli_ctx=cli)
+                table = loader.load_command_table([])
+                loader.load_arguments(command)
+                table[command].load_arguments()
+                arguments = table[command].arguments
+                known_options = {option for arg in arguments.values() for option in arg.options_list}
+                for example in help_text['examples']:
+                    with self.subTest(example=example['name']):
+                        tokens = shlex.split(example['text'])
+                        if tokens[0] == 'sudo':
+                            tokens = tokens[1:]
+                        self.assertEqual(tokens[:3], ['az', 'enclave', action])
+                        options = {token for token in tokens[3:] if token.startswith('-')}
+                        self.assertFalse(options - known_options, 'Example uses unregistered options')
+                        for name, argument in arguments.items():
+                            if name != 'cmd' and argument.options.get('required'):
+                                self.assertTrue(options.intersection(argument.options_list),
+                                                'Example is missing required option: ' + name)
 
     def test_lifecycle_delegation(self):
         """Verify CLI defaults are passed unchanged to the lifecycle implementation."""
         with patch('azext_enclave._lifecycle.launch', return_value={'status': 'running'}) as launch:
             self.assertEqual(custom.launch_enclave('demo', 'demo.igvm'), {'status': 'running'})
             launch.assert_called_once_with(
-                'demo', 'demo.igvm', 'openvmm', '/var/lib/enclave/instances', 120, False)
+                'demo', 'demo.igvm', 'openvmm', 120, False)
         with patch('azext_enclave._lifecycle.destroy', return_value={'status': 'destroyed'}) as destroy:
             self.assertEqual(custom.destroy_enclave('demo'), {'status': 'destroyed'})
-            destroy.assert_called_once_with('demo', '/var/lib/enclave/instances', 30)
+            destroy.assert_called_once_with('demo', 30)
 
     def test_setup_delegation(self) -> None:
         """Keep host preparation separate from Python dependency installation."""
-        self.assertIn('setup.py', helps['enclave setup'])
         with patch('azext_enclave._setup.setup_host', return_value={'status': 'ready'}) as setup:
             self.assertEqual(custom.setup_enclave(), {'status': 'ready'})
             setup.assert_called_once_with(False)

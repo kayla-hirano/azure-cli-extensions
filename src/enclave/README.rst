@@ -135,8 +135,17 @@ script packaged with the extension. Run as your normal user on Linux L1
 with GNU cpio and gzip installed::
 
     "$ENCLAVE_VENV/bin/az" enclave create \
-        --workspace "$HOME/enclave-build" \
         --output-file "$HOME/images/enclave.igvm"
+
+Build intermediates use a unique private temporary directory, honoring
+``TMPDIR`` (normally under ``/tmp``). Optional ``--workspace`` selects a
+different parent, useful for storage with enough space and execution support.
+Failed or interrupted builds automatically retain their private build directory
+and stage logs and report the path for debugging. Validation failures before
+workspace creation have no intermediates to retain. Successful builds delete
+temporary files and stage logs unless ``--keep-intermediates`` is set.
+Cleanup failures report any remaining paths so they can be inspected and removed;
+if cleanup fails after publication, the completed output image remains.
 
 The packaged inputs are under ``azext_enclave/dependencies/``:
 
@@ -151,7 +160,8 @@ The packaged inputs are under ``azext_enclave/dependencies/``:
 Guest debugging is disabled by default, regardless of the bundle's setting.
 ``--debug`` enables both SNP guest debugging and diagnostic logs, so use it
 only when a debug-enabled guest is intended. ``--verbose`` changes logging
-only. Neither logging flag retains the workspace by itself.
+only. ``--verbose`` shows stage progress; ``--debug`` also shows intermediate
+paths.
 
 The default startup script is now named ``enclave-init`` and uses a
 customer-neutral startup banner. Rebuilding an image with changed script
@@ -193,7 +203,7 @@ choosing a new name for every launch. Set ``IGVM`` to your image::
         --igvm "$IGVM" --openvmm /usr/bin/openvmm
 
 Currently, only one Enclave-managed enclave may be active on an L1, even with
-different names or ``--state-dir`` values. A second launch fails until the
+different names. A second launch fails until the
 existing runtime stops. OpenVMM starts on demand, not during setup.
 
 The default timeout is 120 seconds; change it with ``--timeout``.
@@ -272,7 +282,7 @@ View launch evidence
 
 After successful guest readiness, launch saves the JSON response under the
 instance directory. Enclave requires root-owned state directories with mode
-``0700``, including custom ``--state-dir`` locations. Your normal user cannot
+``0700`` under the fixed root. Your normal user cannot
 enter these directories; use sudo to read the evidence directly without
 changing directories::
 
@@ -286,7 +296,6 @@ performs no key release.
 
 The same directory retains ``instance.json``, ``openvmm.log``,
 ``supervisor.log``, and ``com1.log`` for diagnosis, including after destroy.
-Use your custom state directory instead if you specified ``--state-dir``.
 
 To browse all results without sudo, copy the instance directory after a
 successful destroy, when logs have stopped changing and runtime sockets have

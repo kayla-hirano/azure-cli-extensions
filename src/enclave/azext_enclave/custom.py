@@ -28,10 +28,10 @@ def setup_enclave(yes: bool = False) -> dict:
         raise CLIError('Unable to set up Enclave host: {}'.format(error)) from error
 
 
-def create_enclave(cmd: AzCliCommand, workspace: str, output_file: str,
+def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str] = None,
                    dependency_bundle: Optional[str] = None, init_script: Optional[str] = None,
                    signing_key: Optional[str] = None,
-                   keep_intermediates: bool = False, application: Optional[str] = None) -> dict:
+                   application: Optional[str] = None, keep_intermediates: bool = False) -> dict:
     """Compose an IGVM from trusted dependencies and a packaged or caller-supplied application."""
     from ._image_builder import IgvmBuildError, build_igvm
     bundle = Path(dependency_bundle).expanduser() if dependency_bundle is not None else DEFAULT_DEPENDENCY_BUNDLE
@@ -52,16 +52,16 @@ def create_enclave(cmd: AzCliCommand, workspace: str, output_file: str,
             application=Path(application).expanduser() if application is not None else DEFAULT_APPLICATION,
             init_script=(Path(init_script).expanduser() if init_script is not None
                          else DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'),
-            workspace=Path(workspace).expanduser(),
+            workspace=Path(workspace).expanduser() if workspace is not None else None,
             output=Path(output_file).expanduser(),
             signing_key=Path(signing_key).expanduser() if signing_key is not None else None,
-            debug=keep_intermediates,
+            keep_intermediates=keep_intermediates,
             enable_debug=enable_debug,
             logger=logger)
     except IgvmBuildError as error:
         detail = 'Unable to create Enclave image: {}'.format(error)
         if error.workspace is not None:
-            detail += '\nBuild workspace retained at: {}'.format(error.workspace)
+            detail += '\nBuild workspace available at: {}'.format(error.workspace)
         raise CLIError(detail) from error
     return {'igvm': str(result.igvm), 'measurements': result.measurements}
 
@@ -76,20 +76,20 @@ def _instance_result(state: dict) -> dict:
 
 
 def launch_enclave(name: str, igvm: str, openvmm: str = 'openvmm',
-                   state_dir: str = '/var/lib/enclave/instances', timeout: float = 120,
+                   timeout: float = 120,
                    allow_untested_runtime: bool = False) -> dict:
     """Delegate local RPC launch and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import launch
     try:
-        return _instance_result(launch(name, igvm, openvmm, state_dir, timeout, allow_untested_runtime))
+        return _instance_result(launch(name, igvm, openvmm, timeout, allow_untested_runtime))
     except (OSError, ValueError, KeyError) as error:
         raise CLIError('Unable to launch Enclave instance: {}'.format(error)) from error
 
 
-def destroy_enclave(name: str, state_dir: str = '/var/lib/enclave/instances', timeout: float = 30) -> dict:
+def destroy_enclave(name: str, timeout: float = 30) -> dict:
     """Delegate instance teardown and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import destroy
     try:
-        return _instance_result(destroy(name, state_dir, timeout))
+        return _instance_result(destroy(name, timeout))
     except (OSError, ValueError, KeyError) as error:
         raise CLIError('Unable to destroy Enclave instance: {}'.format(error)) from error

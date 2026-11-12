@@ -11,90 +11,68 @@ from knack.help_files import helps  # pylint: disable=unused-import
 
 helps['enclave'] = """
     type: group
-    short-summary: Set up dependencies and manage enclave artifacts and virtual machines.
-    long-summary: Build SNP IGVM images from existing dependencies, prepare Azure Linux L1 hosts, and manage local instances.
+    short-summary: Prepare a host, build enclave images, and run local enclaves.
+    long-summary: Start with setup, create an image, then launch and destroy an enclave.
 """
 
 helps['enclave setup'] = """
     type: command
-    short-summary: Validate Azure Linux 3 L1 and install the supported OpenVMM package.
+    short-summary: Check host requirements and install the enclave runtime if needed.
     long-summary: >
         Run as root on Azure Linux 3.0 L1 with a compatible kernel exposing /dev/mshv.
-        Installs OpenVMM 0.2.0-2.azl3 with confirmation if absent, then verifies its RPM provenance.
-        Existing incompatible or modified installations fail verification and require manual repair.
-        Does not change kernels, add repositories, reboot, or install developer tooling.
-        Python runtime dependencies are installed with the extension through setup.py.
+        Checks the host and the supported OpenVMM runtime, asking before installing it if missing.
+        Does not update the kernel or reboot the host.
     examples:
       - name: Check host prerequisites and install OpenVMM if needed.
-        text: az enclave setup
+        text: sudo az enclave setup
       - name: Approve package installation without an interactive prompt.
-        text: az enclave setup --yes
+        text: sudo az enclave setup --yes
 """
 
 helps['enclave create'] = """
     type: command
-    short-summary: Package an enclave application and init script into an SNP IGVM.
+    short-summary: Build an enclave image using packaged defaults or your own application.
     long-summary: >
-        Run on Linux or WSL with GNU cpio and gzip. Root and Azure login are not required.
-        Uses a trusted measured-pcie-v1 dependency bundle and the packaged static x86-64 enclave application.
-        Defaults to the packaged dependency archive; --dependency-bundle overrides it with an archive or directory.
-        Defaults to the packaged application; --application overrides it with a static x86-64 ELF binary.
-        The application is installed as /bin/enclave_app in the guest.
-        Defaults to the packaged enclave init script; use --init-script to override guest startup.
-        Does not compile workloads or dependencies, install tools, or launch a VM.
-        Only the final IGVM is published; an existing output is never overwritten.
-        Guest debugging is disabled by default. --debug enables SNP guest debugging and diagnostic logs.
-        --keep-intermediates independently retains the build workspace.
-        Returns expected SNP launch measurements.
+        Run in a Linux environment (including WSL) with GNU cpio and gzip. Root and Azure login are not required.
+        Saves an IGVM image and returns expected SNP launch measurements; does not launch an enclave.
+        Existing output files are never overwritten.
+        Failed or interrupted builds retain temporary files and logs automatically and report their location.
+        Successful builds delete them unless --keep-intermediates is set.
+        Use --verbose for progress. --debug also enables guest debugging; do not use it for production images.
     examples:
-      - name: Create an image using the packaged enclave init script.
+      - name: Create an image with the packaged application and startup script.
+        text: az enclave create --output-file ./enclave.igvm
+      - name: Use a different directory for temporary build files.
         text: >
-            az enclave create --workspace /home/user/enclave-build
-            --output-file /home/user/images/enclave.igvm
-      - name: Supply your own bundle, override guest startup, sign, and retain intermediate files.
-        text: >
-            az enclave create --dependency-bundle /opt/enclave/dependencies.tar.gz
-            --init-script /home/user/enclave-init --workspace /home/user/enclave-build
-            --output-file /home/user/images/signed.igvm --signing-key /home/user/test-id-key.pem
-            --keep-intermediates
-      - name: Create a debug-enabled guest image and show diagnostic logs.
-        text: >
-            az enclave create --dependency-bundle /opt/enclave/dependencies
-            --workspace /home/user/enclave-build --output-file /home/user/images/debug.igvm --debug
+            az enclave create --output-file ./enclave.igvm --workspace /mnt/build
       - name: Package your own enclave application with a matching startup script.
         text: >
-            az enclave create --application /home/user/my-enclave-app
-            --init-script /home/user/my-init --workspace /home/user/enclave-build
-            --output-file /home/user/images/custom-app.igvm
+            az enclave create --application ./my-app --init-script ./my-init
+            --output-file ./custom.igvm
 """
 
 helps['enclave launch'] = """
     type: command
-    short-summary: Create and launch the enclave VM from the IGVM file using OpenVMM RPC.
+    short-summary: Start a local enclave from an existing image.
     long-summary: >
-        Run as root on Linux L1. Uses a fixed CPU, memory, PCIe and vsock configuration.
-        Starts a persistent local OpenVMM gRPC server, creates an SNP IGVM VM and resumes it.
-        Allows only one active managed enclave per L1, regardless of name or state directory.
-        Destroy the existing instance before launching another.
-        Waits for an SNP-shaped guest response, but does not verify attestation or release keys.
-        Logs and instance state remain under the state directory.
-        Returns the enclave name, status, vsock port and relay socket, RPC socket, log paths, and evidence paths.
+        Run as root on Linux L1 after setup. Choose an unused name.
+        The enclave keeps running after this command exits; destroy it before launching another.
+        Returns status and log paths under /var/lib/enclave/instances.
+        Checks that the guest responds, but does not verify attestation or release keys.
     examples:
-      - name: Launch an existing compatible SNP image on L1.
-        text: az enclave launch --name demo --igvm /home/user/images/enclave.igvm --openvmm /usr/bin/openvmm
+      - name: Launch an image created with enclave create.
+        text: sudo az enclave launch --name demo --igvm ./enclave.igvm
 """
 
 helps['enclave destroy'] = """
     type: command
-    short-summary: Destroy the enclave using OpenVMM RPC.
+    short-summary: Stop a local enclave and its runtime.
     long-summary: >
-        Run as root on the same Linux L1 and use the same state directory as launch.
-        Tears down the VM through RPC, quits OpenVMM and cleans up owned sockets.
-        If Quit loses its reply, an UNAVAILABLE transport error is accepted only after confirming OpenVMM exited.
-        Preserves the IGVM, logs and instance record. A confirmed destroyed instance can be destroyed again.
-        Returns enclave details and retained log/evidence paths, including for older instance records.
-        Returned socket paths are informational only after destruction; the sockets have been removed.
+        Run as root on the same Linux L1 used for launch.
+        Stops the enclave and preserves its image, logs, and instance record.
+        Retained records reserve their names; use a new name for the next launch.
+        If destruction fails, inspect the logs and retry; failure does not confirm the enclave stopped.
     examples:
       - name: Destroy a local instance.
-        text: az enclave destroy --name demo
+        text: sudo az enclave destroy --name demo
 """
