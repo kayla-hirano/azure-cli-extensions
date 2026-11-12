@@ -4,13 +4,13 @@
 | --- | --- | --- |
 | 1 | External dependency retrieval and default migration | Not started |
 | 2 | Create-time configuration with automatic launch settings | Not started |
-| 3 | Fixed instance location | Not started |
-| 4 | Launch/destroy runtime cleanup | Not started |
+| 3 | Fixed instance location | Done |
+| 4 | Launch/destroy runtime cleanup | Done |
 | 5 | Destroy with automatic cleanup and optional log retention | Not started |
 | 6 | `az enclave status`, including IGVM measurement | Not started |
 | 7 | `az enclave diagnostics logs` listing and viewing | Not started |
 | 8 | Guest application command line (`--app-cmd-line`) | Not started |
-| 9 | Optional build workspace and intermediate-file visibility | Not started |
+| 9 | Optional build workspace and intermediate-file visibility | Done |
 | 10 | CLI core support floor | Not started |
 
 ## Dependency delivery and parameterized launch configuration

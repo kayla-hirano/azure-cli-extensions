@@ -2,25 +2,43 @@
 
 ## 1. Scope and current limitations
 
-Centralize isolation-specific configuration, requirements, and defaults in a
-packaged manifest. **Only SNP is enabled in this change**. Keep shared policy and lifecycle code in Python: no profile selector, plugins, per-type workers, or duplicated flows.
+This change is a **manifest-backed refactor of the existing SNP flow**, not
+delivery of isolation-type selection. Centralize isolation-specific
+configuration, requirements, and defaults in a packaged JSON manifest.
+**SNP remains the only enabled type and the implicit default** for create and
+launch; no new customer selector is introduced.
 
 Today, create requires an SNP Linux-direct recipe and fixed artifact set.
 Launch hashes the image but does not inspect its platforms; it unconditionally
 requests SNP, one CPU, 160 MiB, and fixed COM1/PCIe/vsock settings. Readiness
 requires an SNP-shaped report. Instance records do not identify isolation.
 
-**In scope:** manifest-backed create/launch, standard IGVM platform
-inspection, an optional validated launch selector, and explicit instance identity.
-No backward compatibility with earlier development commands or records is required.
-**Deferred:** customer CPU/memory overrides and image-embedded effective-settings
-metadata from [NEW_DESIGN.md](NEW_DESIGN.md) proposal 2, additional isolation
-implementations, dependency retrieval, runtime/protocol upgrades,
-status/diagnostics, and workspace/path/cleanup changes.
+### In scope for this change
 
-This document supersedes proposal 2's isolation-selection rules. Future
-CPU/memory overrides reuse the same SNP manifest and fixed boot/device layout;
-they are not prerequisites for this default-only change.
+- Package and validate the SNP manifest defined in section 4, including typed
+  loading through an explicit enabled-type/file mapping.
+- Replace hardcoded isolation-specific configuration in setup, create, and
+  launch with values from that manifest: dependency requirements, supported
+  recipe/layout, CPU/memory defaults, runtime/device settings, and host
+  requirements. Apply the corresponding subset of section 2's file changes.
+- Preserve existing SNP behavior, shared Python policy, and lifecycle wiring.
+  Keep genuine SNP implementations in Python, including measurement, signing,
+  boot-mode/protobuf mappings, and report parsing; moving configuration does
+  not make these implementations isolation-independent.
+- Add focused manifest validation, installed-wheel resource lookup, and
+  regression tests, with documentation updates for this refactor.
+
+### Out of scope / deferred
+
+- `--isolation-type`, IGVM platform inspection/discovery/selection, and
+  multi-platform runtime-selection validation (section 3).
+- New persisted isolation identity/provenance and schema-2 instance records
+  (section 5); these are not prerequisites for consuming manifest defaults.
+- Customer CPU/memory overrides and image-embedded effective-settings metadata
+  from [NEW_DESIGN.md](NEW_DESIGN.md) proposal 2, additional isolation
+  implementations, dependency retrieval, runtime/protocol upgrades,
+  status/diagnostics, and workspace/path/cleanup changes.
+- Profile selectors, plugins, per-type workers, or duplicated lifecycle flows.
 
 ## 2. Code changes by file
 
