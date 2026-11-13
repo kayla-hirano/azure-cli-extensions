@@ -27,6 +27,7 @@ class IsolationManifestTest(unittest.TestCase):
         configuration = _isolation.load_isolation()
         self.assertEqual(configuration.isolation_type, 'snp')
         self.assertEqual(configuration.dependency_bundle.profile, 'measured-pcie-v1')
+        self.assertEqual(configuration.image.command_line, self.document['image']['command_line'])
         with patch.object(_isolation.resources, 'files') as lookup:
             for value in ('tdx', 'native', '../snp', '/tmp/snp.json', ''):
                 with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'not enabled'):
@@ -46,11 +47,13 @@ class IsolationManifestTest(unittest.TestCase):
                 _isolation.load_isolation()
 
     def test_registration_alone_does_not_implement_a_manifest_contract(self) -> None:
-        """Require Python implementation support even when another isolation manifest is registered."""
-        self.document['isolation_type'] = 'tdx'
-        with patch.dict(_isolation._ENABLED_MANIFESTS, {'tdx': 'manifests/tdx.json'}):
+        """Do not impose SNP's schema on a registered type that has no parser."""
+        document = {'different_manifest_format': True}
+        with patch.dict(_isolation._ENABLED_MANIFESTS, {'tdx': 'manifests/tdx.json'}), \
+                patch.object(_isolation, '_parse_snp_manifest') as snp_parser:
             with self.assertRaisesRegex(ValueError, 'Unsupported isolation configuration type: tdx'):
-                _isolation.parse_manifest(self.document, 'tdx')
+                _isolation.parse_manifest(document, 'tdx')
+            snp_parser.assert_not_called()
 
     def test_backend_requirements_do_not_depend_on_the_isolation_validator(self) -> None:
         """Reject unsupported backends and missing backend devices before isolation-specific validation."""
