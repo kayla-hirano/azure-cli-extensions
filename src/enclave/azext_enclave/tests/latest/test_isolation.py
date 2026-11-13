@@ -98,6 +98,8 @@ class IsolationManifestTest(unittest.TestCase):
                 [], ['kernel'], ['kernel'] * 5, ['kernel', {}], 'kernel'),
             'defaults.processor_count': (True, 1.0, 0, -1, 1 << 32),
             'defaults.memory_mib': (False, '160', 0, -1, 1 << 64),
+            'image': (None, [], 'console=ttyS0'),
+            'image.command_line': (None, True, 1, [], {}),
             'runtime.backend': ('kvm', None),
             'runtime.disable_vmbus': (1, 'true', None),
             'runtime.disable_hv': (0, 'false', None),
@@ -125,6 +127,14 @@ class IsolationManifestTest(unittest.TestCase):
                     section[keys[-1]] = value
                     with self.assertRaises(ValueError):
                         _isolation.parse_manifest(document, 'snp')
+
+    def test_kernel_command_line_is_preserved(self) -> None:
+        """Allow an empty command line and preserve kernel argument spacing and quotes."""
+        for value in ('', 'console=ttyS0  init="/bin/custom init" panic=-1'):
+            with self.subTest(value=value):
+                self.document['image']['command_line'] = value
+                configuration = _isolation.parse_manifest(self.document, 'snp')
+                self.assertEqual(configuration.image.command_line, value)
 
     def test_unknown_fields_are_not_silently_ignored(self) -> None:
         """Reject undeclared manifest fields rather than silently ignoring misspelled settings."""

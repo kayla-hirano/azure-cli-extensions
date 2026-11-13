@@ -43,6 +43,13 @@ class ResourceDefaults:
 
 
 @dataclass(frozen=True)
+class ImageConfiguration:
+    """Image metadata; create continues to use the bundle's IGVM recipe."""
+
+    command_line: str
+
+
+@dataclass(frozen=True)
 class RuntimeConfiguration:
     """Backend and existing runtime feature switches."""
 
@@ -80,6 +87,7 @@ class IsolationConfiguration:  # pylint: disable=too-many-instance-attributes
     supported_configuration: SupportedConfiguration
     dependency_bundle: DependencyBundle
     defaults: ResourceDefaults
+    image: ImageConfiguration
     runtime: RuntimeConfiguration
     serial_port: int
     pcie: PcieConfiguration
@@ -156,6 +164,9 @@ def parse_manifest(document: object, isolation_type: str) -> IsolationConfigurat
     defaults = _object(root['defaults'], 'processor_count memory_mib', 'defaults')
     cpu = _integer(defaults['processor_count'], 1, 0xffffffff, 'defaults.processor_count')
     memory = _integer(defaults['memory_mib'], 1, 0xffffffffffffffff // (1024 * 1024), 'defaults.memory_mib')
+    image = ImageConfiguration(**_object(root['image'], 'command_line', 'image'))
+    if not isinstance(image.command_line, str):
+        raise ValueError('Invalid isolation manifest image.command_line: expected a string')
     runtime = _object(root['runtime'], 'backend disable_vmbus disable_hv', 'runtime')
     if any(not isinstance(runtime[key], bool) for key in ('disable_vmbus', 'disable_hv')):
         raise ValueError('Invalid isolation manifest runtime switches: expected booleans')
@@ -188,7 +199,7 @@ def parse_manifest(document: object, isolation_type: str) -> IsolationConfigurat
         raise ValueError('Invalid isolation manifest host character device paths')
     configuration = IsolationConfiguration(
         1, isolation_type, supported, DependencyBundle(1, bundle['profile'], required),
-        ResourceDefaults(cpu, memory), RuntimeConfiguration(**runtime), serial_port,
+        ResourceDefaults(cpu, memory), image, RuntimeConfiguration(**runtime), serial_port,
         PcieConfiguration(**pcie), character_devices)
     validate_configuration(configuration)
     return configuration

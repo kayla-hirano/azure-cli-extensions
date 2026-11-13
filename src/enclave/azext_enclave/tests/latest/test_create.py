@@ -341,6 +341,7 @@ class BuildInputs:
                 'isolation_type': {'snp': {'enable_debug': True}},
                 'image': {'snp_linux_direct': {
                     'processor_count': 1, 'memory_page_count': 40960,
+                    'linux': {'use_initrd': True, 'command_line': 'bundle-command-line'},
                     'pcie_host_bridge': {
                         'segment': 0, 'start_bus': 0, 'end_bus': 1, 'ecam_base': 4141875200,
                         'low_mmio_base': 4143972352, 'low_mmio_size': 16777216,
