@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import grpc
 from knack.log import get_logger
@@ -25,7 +25,8 @@ from knack.util import CLIError
 from ._instance import (alive, check_private, cleanup_sockets, host_lock, identity,
                         instance_lock, instance_path, read_record, require_host, stop_owned,
                         write_record)
-from ._rpc import VmClient, create_request
+from ._isolation import load_isolation
+from ._rpc import VmClient, create_request, validate_launch_configuration
 from ._runtime import resolve_runtime
 from .rpc import vmservice_pb2 as vm
 
@@ -77,8 +78,28 @@ def read_line(stream: Union[BufferedReader, BufferedRWPair], connection: Optiona
     return bytes(line)
 
 
-def probe_guest(directory: Path, deadline: float) -> None:
-    """Retry the guest readiness exchange and save an SNP-shaped response without verifying attestation."""
+def _validate_snp_response(value: object) -> None:
+    """Check SNP evidence type, length, and hexadecimal encoding without verifying attestation."""
+    evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
+    report = evidence.get('report') if isinstance(evidence, dict) and evidence.get('tee') == 'snp' else None
+    if not isinstance(report, str) or len(report) != 2368:
+        raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
+    try:
+        bytes.fromhex(report)
+    except ValueError as error:
+        raise CLIError('Guest SNP report is not valid hexadecimal.') from error
+
+
+def _guest_response_validator(isolation_type: str) -> Callable[[object], None]:
+    """Select an implemented evidence-shape validator before opening the guest connection."""
+    if isolation_type == 'snp':
+        return _validate_snp_response
+    raise CLIError('Guest readiness is not implemented for isolation type: ' + isolation_type)
+
+
+def probe_guest(directory: Path, deadline: float, isolation_type: str = 'snp') -> None:
+    """Retry the shared guest exchange and retain evidence after type-specific shape checks."""
+    validate_response = _guest_response_validator(isolation_type)
     last_error = 'Guest relay has not become available.'
     challenge = secrets.token_hex(32)
     while time.monotonic() < deadline:
@@ -100,14 +121,7 @@ def probe_guest(directory: Path, deadline: float) -> None:
                     stream.flush()
                     response = read_line(stream, connection, deadline)
             value = json.loads(response)
-            evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
-            report = evidence.get('report') if isinstance(evidence, dict) and evidence.get('tee') == 'snp' else None
-            if not isinstance(report, str) or len(report) != 2368:
-                raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
-            try:
-                bytes.fromhex(report)
-            except ValueError as error:
-                raise CLIError('Guest SNP report is not valid hexadecimal.') from error
+            validate_response(value)
             (directory / 'response.json').write_bytes(response)
             return
         except OSError as error:
@@ -198,14 +212,18 @@ def _rollback_launch(directory: Path, state: dict, error: BaseException) -> None
 def launch(name: str, igvm: str, openvmm: str = 'openvmm',
            timeout: float = 120,
            allow_untested_runtime: bool = False) -> dict:
-    """Create and resume a supervised SNP instance, persisting state and rolling back failures."""
+    """Create and resume an instance through shared supervision, persistence, and recovery."""
+    configuration = load_isolation()
+    validate_launch_configuration(configuration)
+    _guest_response_validator(configuration.isolation_type)
     require_host(timeout)
     image = Path(igvm).expanduser().resolve()
     if not image.is_file():
         raise CLIError('IGVM file not found: {}'.format(image))
-    device = Path('/dev/mshv')
-    if not device.exists() or not stat.S_ISCHR(device.stat().st_mode):
-        raise CLIError('L1 requires the /dev/mshv character device.')
+    for required in configuration.character_devices:
+        device = Path(required)
+        if not device.exists() or not stat.S_ISCHR(device.stat().st_mode):
+            raise CLIError('L1 requires the {} character device.'.format(required))
     executable = resolve_runtime(openvmm, allow_untested_runtime)
     executable_digest = _file_digest(executable)
     image_digest = _file_digest(image)
@@ -229,16 +247,18 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
             _wait_runtime(directory, state['supervisor'], deadline)
             with VmClient(directory / 'rpc.sock', deadline) as client:
                 client.ready()
-                # CreateVM allocates a paused SNP guest; ResumeVM starts guest execution.
-                client.call('CreateVM', create_request(image, directory, name))
+                # CreateVM allocates a paused guest; ResumeVM starts guest execution.
+                client.call('CreateVM', create_request(image, directory, name, configuration))
                 state['status'] = 'paused'
                 write_record(directory / 'instance.json', state)
                 client.call('ResumeVM')
             # Closing the client channel leaves OpenVMM running. Probe the guest via vsock, not gRPC.
-            probe_guest(directory, deadline)
+            probe_guest(directory, deadline, configuration.isolation_type)
             state['status'] = 'running'
             write_record(directory / 'instance.json', state)
-            logger.warning('SNP report received; its signature, measurement and trust chain are NOT verified.')
+            logger.warning(
+                '%s report received; its signature, measurement and trust chain are NOT verified.',
+                configuration.isolation_type)
             return state
         except (CLIError, OSError, ValueError, KeyError, subprocess.SubprocessError, KeyboardInterrupt) as error:
             _rollback_launch(directory, state, error)

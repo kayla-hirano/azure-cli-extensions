@@ -39,6 +39,7 @@ helps['enclave create'] = """
         Failed or interrupted builds retain temporary files and logs automatically and report their location.
         Successful builds delete them unless --keep-intermediates is set.
         Use --verbose for progress. --debug also enables guest debugging; do not use it for production images.
+        Currently, SNP is the implicit and only enabled isolation type.
     examples:
       - name: Create an image with the packaged application and startup script.
         text: az enclave create --output-file ./enclave.igvm
@@ -59,6 +60,7 @@ helps['enclave launch'] = """
         The enclave keeps running after this command exits; destroy it before launching another.
         Returns status and log paths under /var/lib/enclave/instances.
         Checks that the guest responds, but does not verify attestation or release keys.
+        Currently, SNP is the implicit and only enabled isolation type.
     examples:
       - name: Launch an image created with enclave create.
         text: sudo az enclave launch --name demo --igvm ./enclave.igvm

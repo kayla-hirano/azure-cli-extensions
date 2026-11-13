@@ -7,6 +7,7 @@
 
 import os
 import tempfile
+from dataclasses import replace
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from google.protobuf.empty_pb2 import Empty
 from knack.util import CLIError
 
 from azext_enclave import _instance, _lifecycle
+from azext_enclave._isolation import load_isolation
 from azext_enclave.rpc import vmservice_pb2 as vm
 from ._helpers import LinuxFilesystemTest
 
@@ -151,6 +153,66 @@ class LifecycleTest(LinuxFilesystemTest):
             self.assertEqual(runtime.popen.call_args.kwargs['pass_fds'], (47,))
         self.assertEqual(_instance.read_record(self.directory / 'instance.json'), result)
 
+    def test_launch_uses_manifest_without_changing_instance_schema(self) -> None:
+        """Apply manifest resources and evidence handling while preserving schema 1 and the attestation disclaimer."""
+        configuration = load_isolation()
+        configuration = replace(configuration, defaults=replace(
+            configuration.defaults, processor_count=2, memory_mib=256))
+        with self.mock_launch_runtime() as runtime, \
+                patch.object(_lifecycle, 'load_isolation', return_value=configuration), \
+                patch.object(_lifecycle.logger, 'warning') as warning:
+            result = _lifecycle.launch('demo', str(self.image))
+        request = self.client.call.call_args_list[0].args[1]
+        self.assertEqual(request.config.processor_config.processor_count, 2)
+        self.assertEqual(request.config.memory_config.memory_mb, 256)
+        self.assertEqual(result['schema'], 1)
+        self.assertNotIn('isolation_type', result)
+        runtime.probe.assert_called_once_with(self.directory, runtime.probe.call_args.args[1], 'snp')
+        warning.assert_called_once_with(
+            '%s report received; its signature, measurement and trust chain are NOT verified.',
+            configuration.isolation_type)
+
+    def test_invalid_manifest_fails_before_instance_creation(self) -> None:
+        """Reject invalid isolation metadata before resolving the runtime or creating instance state."""
+        with self.mock_launch_runtime() as runtime, \
+                patch.object(_lifecycle, 'load_isolation', side_effect=ValueError('bad manifest')), \
+                patch.object(_lifecycle, 'resolve_runtime') as resolve:
+            with self.assertRaisesRegex(ValueError, 'bad manifest'):
+                _lifecycle.launch('demo', str(self.image))
+        runtime.popen.assert_not_called()
+        resolve.assert_not_called()
+        self.assertFalse(self.directory.exists())
+
+    def test_missing_launch_implementations_fail_before_host_or_instance_changes(self) -> None:
+        """Require both RPC and guest-readiness implementations before performing host or instance operations."""
+        configuration = replace(load_isolation(), isolation_type='tdx')
+        for rpc_supported, message in (
+                (False, 'RPC launch is not implemented'),
+                (True, 'Guest readiness is not implemented')):
+            with self.subTest(rpc_supported=rpc_supported), \
+                    patch.object(_lifecycle, 'load_isolation', return_value=configuration), \
+                    patch.object(_lifecycle, 'require_host') as host, \
+                    patch.object(_lifecycle, 'resolve_runtime') as resolve, \
+                    patch.object(_lifecycle, 'instance_path') as instance:
+                rpc_check = (patch.object(_lifecycle, 'validate_launch_configuration')
+                             if rpc_supported else nullcontext())
+                with rpc_check, self.assertRaisesRegex((ValueError, CLIError), message):
+                    _lifecycle.launch('demo', str(self.image))
+                host.assert_not_called()
+                resolve.assert_not_called()
+                instance.assert_not_called()
+        self.assertFalse(self.directory.exists())
+
+    def test_manifest_host_requirements_fail_before_instance_creation(self) -> None:
+        """Check every manifest-required host device before starting a supervisor or creating instance state."""
+        configuration = replace(load_isolation(), character_devices=('/dev/mshv', '/dev/required'))
+        with self.mock_launch_runtime() as runtime, \
+                patch.object(_lifecycle, 'load_isolation', return_value=configuration):
+            with self.assertRaisesRegex(CLIError, '/dev/required character device'):
+                _lifecycle.launch('demo', str(self.image))
+        runtime.popen.assert_not_called()
+        self.assertFalse(self.directory.exists())
+
     def test_destroy_teardown_then_quit_and_preserve_image(self):
         """Release the VM before quitting its server while retaining the reusable IGVM."""
         self.prepare_destroy()
@@ -204,6 +266,7 @@ class LifecycleTest(LinuxFilesystemTest):
         return error
 
     def test_destroy_quit_disconnect_succeeds_only_after_owned_server_exits(self) -> None:
+        """Treat a Quit disconnect as success only after confirming the owned server has exited."""
         state = self.prepare_destroy()
         state.update(status='destroy-failed', error='previous failure', cleanup_error='previous cleanup')
         for checks in ([True, True, False], [True, True, True, False]):
@@ -229,6 +292,7 @@ class LifecycleTest(LinuxFilesystemTest):
                                  ['PropertiesVM', 'TeardownVM', 'Quit'])
 
     def test_destroy_quit_disconnect_with_live_server_remains_retryable(self) -> None:
+        """Retain a retryable destruction failure when Quit disconnects but the owned server remains alive."""
         self.prepare_destroy()
         self.client.call.side_effect = [
             vm.PropertiesVMResponse(state=vm.Running), Empty(), self.quit_error(),
@@ -247,6 +311,7 @@ class LifecycleTest(LinuxFilesystemTest):
         self.assertIn('Stream removed (Socket closed)', state['error'])
 
     def test_destroy_other_quit_errors_are_not_suppressed(self) -> None:
+        """Preserve non-disconnect Quit failures instead of claiming successful destruction."""
         self.prepare_destroy()
         for error in (self.quit_error(grpc.StatusCode.INTERNAL),
                       self.quit_error(grpc.StatusCode.DEADLINE_EXCEEDED), CLIError('Quit rejected')):
@@ -265,6 +330,7 @@ class LifecycleTest(LinuxFilesystemTest):
                     self.directory / 'instance.json')['status'], 'destroy-failed')
 
     def test_destroy_disconnect_before_quit_is_not_suppressed(self) -> None:
+        """Preserve management disconnects during state queries or teardown rather than treating them as Quit."""
         self.prepare_destroy()
         for responses in ([self.quit_error()],
                           [vm.PropertiesVMResponse(state=vm.Running), self.quit_error()]):
@@ -289,6 +355,7 @@ class LifecycleTest(LinuxFilesystemTest):
         self.assertEqual(_instance.read_record(self.directory / 'instance.json')['status'], 'destroy-failed')
 
     def test_destroy_cleanup_failure_is_persisted_for_retry(self) -> None:
+        """Persist cleanup errors and interruptions so a later destroy can reconcile the retained instance."""
         self.prepare_destroy()
         for error in (CLIError('still alive'), OSError('socket removal denied'), KeyboardInterrupt()):
             with self.subTest(error=type(error).__name__):
@@ -307,6 +374,7 @@ class LifecycleTest(LinuxFilesystemTest):
         self.assertNotIn('cleanup_error', result)
 
     def test_interrupted_shutdown_does_not_force_process_cleanup(self) -> None:
+        """Retain an interrupted graceful shutdown for retry without forcing subsequent process cleanup."""
         self.prepare_destroy()
         with patch('azext_enclave._lifecycle.alive', return_value=True), \
                 patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \

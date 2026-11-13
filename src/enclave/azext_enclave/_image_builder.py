@@ -12,6 +12,7 @@ There is no dependency on the repository's scripts or CLI implementation.
 """
 
 import errno
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -24,10 +25,18 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from typing import BinaryIO, Dict, List, NamedTuple, Optional, Sequence
+from typing import BinaryIO, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from ._isolation import IsolationConfiguration, load_isolation, validate_configuration
 
 
-__all__ = ["IgvmBuildError", "IgvmBuildResult", "build_igvm"]
+__all__ = ["IgvmBuildError", "IgvmBuildResult", "SnpBuildOptions", "build_igvm", "validate_build_configuration"]
+
+
+@dataclass(frozen=True)
+class SnpBuildOptions:
+    """Caller-selected SNP build settings, separate from packaged configuration."""
+
+    signing_key: Optional[Path] = None
 
 
 class IgvmBuildResult(NamedTuple):
@@ -125,25 +134,68 @@ def _extract_bundle(archive_path: Path, destination: Path) -> Path:
         "at its root or inside one top-level directory")
 
 
-def _dependencies(bundle: Path) -> Dict[str, Path]:
+def _recipe(path: Path, configuration: IsolationConfiguration) -> dict:
+    """Load a single-guest recipe and validate its architecture and isolation-specific shape."""
+    config = _read_json(path)
+    architecture = config.get("guest_arch")
+    if architecture != "x64":
+        raise ValueError("IGVM recipe architecture is not implemented: {}".format(architecture))
+    guests = config.get("guest_configs")
+    if (not isinstance(guests, list) or len(guests) != 1
+            or not isinstance(guests[0], dict)):
+        raise ValueError("Expected one IGVM guest configuration")
+    if configuration.isolation_type == "snp":
+        _snp_recipe(guests[0])
+    else:
+        raise ValueError("IGVM recipe handling is not implemented for isolation type: " + configuration.isolation_type)
+    return config
+
+
+def _snp_recipe(guest: dict) -> None:
+    """Require SNP Linux-direct resource fields."""
+    isolation = guest.get("isolation_type")
+    if (not isinstance(isolation, dict) or set(isolation) != {"snp"}
+            or not isinstance(isolation["snp"], dict)):
+        raise ValueError("IGVM manifest is missing SNP isolation settings")
+    image = guest.get("image")
+    if not isinstance(image, dict) or set(image) != {"snp_linux_direct"}:
+        raise ValueError("Expected an SNP Linux-direct IGVM recipe")
+    linux = image["snp_linux_direct"]
+    if not isinstance(linux, dict):
+        raise ValueError("Expected an SNP Linux-direct IGVM recipe")
+    bridge = linux.get("pcie_host_bridge")
+    fields = {
+        "segment", "start_bus", "end_bus", "ecam_base",
+        "low_mmio_base", "low_mmio_size", "high_mmio_base", "high_mmio_size",
+    }
+    if (not isinstance(bridge, dict) or set(bridge) != fields
+            or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in bridge.values())):
+        raise ValueError("IGVM manifest has missing or invalid measured PCIe settings")
+    for field in ("processor_count", "memory_page_count"):
+        value = linux.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError("IGVM manifest has invalid " + field)
+
+
+def _dependencies(bundle: Path, configuration: Optional[IsolationConfiguration] = None) -> Dict[str, Path]:
+    """Resolve bundle artifacts after checking the support contract, paths, hashes, tools, and recipe."""
+    configuration = configuration if configuration is not None else load_isolation()
+    contract = configuration.dependency_bundle
     manifest = _read_json(_input_file(
         bundle / "dependency-manifest.v1.json"))
     version = manifest.get("schema_version")
     if (not isinstance(version, int) or isinstance(version, bool)
-            or version != 1
-            or manifest.get("profile") != "measured-pcie-v1"
-            or manifest.get("guest_arch") != "x86_64"):
+            or version != contract.schema_version
+            or manifest.get("profile") != contract.profile
+            or manifest.get("guest_arch") != configuration.supported_configuration.architecture):
         raise ValueError(
-            "Expected schema 1, measured-pcie-v1, x86_64 dependencies")
+            "Expected schema {}, {}, {} dependencies".format(
+                contract.schema_version, contract.profile, configuration.supported_configuration.architecture))
 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
         raise ValueError("Dependency manifest has no artifacts object")
-    required = {
-        "kernel", "base_initrd", "snp_bootshim", "igvmfilegen",
-        "igvm_manifest",
-    }
-    if not required.issubset(artifacts):
+    if not set(contract.required_artifacts).issubset(artifacts):
         raise ValueError("Dependency manifest is missing required artifacts")
 
     paths = {}
@@ -171,19 +223,55 @@ def _dependencies(bundle: Path) -> Dict[str, Path]:
     if not os.access(paths["igvmfilegen"], os.X_OK):
         raise ValueError(
             "Dependency igvmfilegen is not executable; check file permissions or select another --workspace.")
-    config = _read_json(paths["igvm_manifest"])
-    guests = config.get("guest_configs")
-    if (config.get("guest_arch") != "x64"
-            or not isinstance(guests, list) or len(guests) != 1
-            or not isinstance(guests[0], dict)):
-        raise ValueError("Expected one x64 measured-PCIe guest configuration")
-    image = guests[0].get("image")
-    linux = image.get("snp_linux_direct") if isinstance(image, dict) else None
-    if (not isinstance(linux, dict)
-            or not isinstance(linux.get("pcie_host_bridge"), dict)
-            or not linux["pcie_host_bridge"]):
-        raise ValueError("IGVM manifest is missing measured PCIe settings")
+    _recipe(paths["igvm_manifest"], configuration)
     return paths
+
+
+def validate_build_configuration(
+    configuration: IsolationConfiguration, *, isolation_options: Optional[SnpBuildOptions] = None,
+    enable_guest_debug: bool = False,
+) -> SnpBuildOptions:
+    """Validate support and resolve type-specific defaults before reading inputs."""
+    if isolation_options is not None and not isinstance(isolation_options, SnpBuildOptions):
+        raise ValueError("Unsupported isolation build options: " + type(isolation_options).__name__)
+    if configuration.isolation_type == "snp":
+        validate_configuration(configuration)
+        return isolation_options if isolation_options is not None else SnpBuildOptions()
+    if isolation_options is not None and isolation_options.signing_key is not None:
+        raise ValueError("SNP ID-block signing is not supported for isolation type: " + configuration.isolation_type)
+    if enable_guest_debug:
+        raise ValueError(
+            "Guest debug configuration is not implemented for isolation type: " + configuration.isolation_type)
+    if isolation_options is not None:
+        raise ValueError("SNP build options are not supported for isolation type: " + configuration.isolation_type)
+    raise ValueError("Image creation is not implemented for isolation type: " + configuration.isolation_type)
+
+
+def _generation_inputs(
+    dependencies: Dict[str, Path], initrd: Path, configuration: IsolationConfiguration,
+    enable_guest_debug: bool,
+) -> Tuple[dict, dict]:
+    """Return a private recipe with the debug override and isolation-specific generator resource paths."""
+    config = _recipe(dependencies["igvm_manifest"], configuration)
+    if configuration.isolation_type == "snp":
+        guest = config["guest_configs"][0]
+        guest["isolation_type"]["snp"]["enable_debug"] = enable_guest_debug
+        resources = {
+            "linux_kernel": str(dependencies["kernel"]),
+            "linux_initrd": str(initrd),
+            "snp_bootshim": str(dependencies["snp_bootshim"]),
+        }
+    else:
+        raise ValueError(
+            "IGVM generation inputs are not implemented for isolation type: " + configuration.isolation_type)
+    return config, {"resources": resources}
+
+
+def _measurements(image: Path, isolation_type: str) -> Dict[str, str]:
+    """Read generator measurements through the selected isolation implementation."""
+    if isolation_type == "snp":
+        return {"snp": _snp_measurement(image)}
+    raise ValueError("Image measurements are not implemented for isolation type: " + isolation_type)
 
 
 def _validate_application(application: Path) -> None:
@@ -331,10 +419,11 @@ def _compose_initrd(
     return result
 
 
-def _sign_igvm(
+def _sign_snp_id_block(
     generator: Path, image: Path, key: Path, work: Path,
     logger: Optional[logging.Logger],
 ) -> Path:
+    """Sign the SNP ID block and return a new image embedding its signature and public key."""
     payload = _input_file(image.with_name(image.stem + "-snp.idblock"))
     public_key = work / "id-public-key.pem"
     signature = work / "id-signature.der"
@@ -374,7 +463,8 @@ def _validate_output_paths(
     return result
 
 
-def _validate_init_and_tools(init: Path, key: Optional[Path]) -> int:
+def _validate_init_and_tools(init: Path) -> int:
+    """Validate the init script and shared packaging tools, and return the archive timestamp."""
     with init.open("rb") as source:
         entrypoint = source.read()
     if not entrypoint.startswith(b"#!") or b"\r" in entrypoint:
@@ -383,8 +473,7 @@ def _validate_init_and_tools(init: Path, key: Optional[Path]) -> int:
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
     if not 0 <= epoch <= 0xffffffff:
         raise ValueError("SOURCE_DATE_EPOCH must fit a newc timestamp")
-    commands = ("cpio", "gzip", "openssl") if key else ("cpio", "gzip")
-    for command in commands:
+    for command in ("cpio", "gzip"):
         if shutil.which(command) is None:
             raise ValueError("Required command not found: " + command)
     return epoch
@@ -423,60 +512,42 @@ def build_igvm(
     init_script: Path,
     output: Path,
     workspace: Optional[Path] = None,
-    signing_key: Optional[Path] = None,
     keep_intermediates: bool = False,
-    enable_debug: bool = False,
+    enable_guest_debug: bool = False,
+    isolation_options: Optional[SnpBuildOptions] = None,
     logger: Optional[logging.Logger] = None,
+    configuration: Optional[IsolationConfiguration] = None,
 ) -> IgvmBuildResult:
-    """Build one IGVM without compiling dependencies or changing inputs.
+    """Build and publish one IGVM without compiling dependencies or changing inputs.
 
-    ``dependency_bundle`` is a trusted bundle directory or tar/tar.gz archive.
-    Archives are extracted into the private workspace. Links, special files,
-    duplicate files and unsafe paths are rejected; dependency hashes are
-    checked before executing bundled tools.
+    Requires Linux, cpio/gzip, an ELF64 x86-64 application without PT_INTERP,
+    and an LF shebang init script that ultimately executes /bin/enclave_app.
+    The trusted dependency bundle may be a directory or tar/tar.gz archive;
+    artifact paths and hashes are checked before bundled tools run.
 
-    ``application`` is an ELF64 x86-64 executable without PT_INTERP (including
-    static PIE). This is a basic format check, not a complete ABI verifier.
-    ``init_script`` is the caller's LF-terminated shebang script; it owns
-    mounts and arguments and must ultimately execute /bin/enclave_app.
-    The CLI supplies dependencies/initramfs/enclave-init.
-    No app arguments are generic defaults.
+    Packaged metadata defines support and dependency requirements. The bundle's
+    recipe owns image settings; launch uses snp.json manifest
+    independently. External release validation must keep both compatible.
+    Guest debug is overridden to disabled unless enable_guest_debug is true.
 
-    With ``signing_key=None``, no SNP ID block is embedded. Otherwise,
-    ``signing_key`` is the caller's PEM ECDSA P-384 private key with no
-    passphrase. OpenSSL derives its public key and signs the generated
-    .idblock payload with SHA-384; igvmfilegen embeds the payload, DER
-    signature, and public key before publication. The key is not copied into
-    the workspace or image. Password prompts and key generation are not
-    supported. Signing failure never falls back to an unsigned image.
+    isolation_options defaults to the selected type's settings. SNP signing
+    optionally uses an unencrypted PEM P-384 key; it is never copied, and
+    signing failures never publish an unsigned fallback.
 
-    A private directory under ``workspace`` (or Python's temporary location
-    when omitted) holds rootfs, initrd, generator sidecars, resources, and stage
-    logs. Failures and interruptions retain this directory automatically;
-    ``keep_intermediates=True`` also retains it on success. Retained failure
-    directories are exposed through IgvmBuildError.workspace. Validation
-    failures before workspace creation have no directory to retain.
-    Timestamps follow SOURCE_DATE_EPOCH, defaulting to zero as in the existing
-    packaging script.
-
-    An optional caller-configured ``logger`` receives INFO progress and DEBUG
-    log paths. Tool output stays in stage files; no handlers are installed.
-    ``enable_debug`` controls SNP guest debugging, defaulting to disabled
-    regardless of the dependency bundle's setting.
-
-    Returns the image path and expected SNP launch measurement from the
-    generator's JSON sidecar. This is not an attestation report or
-    verification.
-    Missing or malformed measurements fail the build before publication.
-    Only ``output`` is published. Its parent filesystem must support hard
-    links, used to publish a completed file atomically without overwriting.
-    Workspace and output may be on different filesystems. No drive is required.
+    Output is never overwritten; its filesystem must support hard links.
+    A private build workspace is retained on failure/interruption or when
+    keep_intermediates is true. IgvmBuildError.workspace identifies retained
+    failure files, if workspace creation was reached.
+    Returns the image path and expected measurements, not verified attestation.
     """
     stage = "validate"
     work = None
     staged_output = None
     failure = None
     try:
+        configuration = configuration if configuration is not None else load_isolation()
+        isolation_options = validate_build_configuration(
+            configuration, isolation_options=isolation_options, enable_guest_debug=enable_guest_debug)
         if logger is not None:
             logger.info("Validating dependencies and application")
         if not sys.platform.startswith("linux"):
@@ -484,13 +555,16 @@ def build_igvm(
         bundle = Path(dependency_bundle).resolve(strict=True)
         app = _input_file(Path(application))
         init = _input_file(Path(init_script))
-        key = (_input_file(Path(signing_key))
-               if signing_key is not None else None)
+        key = None
+        if configuration.isolation_type == "snp" and isolation_options.signing_key is not None:
+            key = _input_file(Path(isolation_options.signing_key))
+            if shutil.which("openssl") is None:
+                raise ValueError("Required command not found: openssl")
         parent = Path(workspace if workspace is not None else tempfile.gettempdir()).resolve()
         result = _validate_output_paths(bundle, app, init, key, parent, Path(output))
-        dependencies = _dependencies(bundle) if bundle.is_dir() else None
+        dependencies = _dependencies(bundle, configuration) if bundle.is_dir() else None
         _validate_application(app)
-        epoch = _validate_init_and_tools(init, key)
+        epoch = _validate_init_and_tools(init)
 
         parent.mkdir(parents=True, exist_ok=True)
         stage = "prepare-workspace"
@@ -501,29 +575,18 @@ def build_igvm(
             stage = "extract-dependencies"
             extracted = _extract_bundle(bundle, work / "dependencies")
             stage = "validate-dependencies"
-            dependencies = _dependencies(extracted)
+            dependencies = _dependencies(extracted, configuration)
         stage = "compose-initrd"
         initrd = _compose_initrd(
             dependencies["base_initrd"], app, init, work, epoch, logger)
 
         stage = "generate-igvm"
         manifest = work / "igvm-manifest.json"
-        config = _read_json(dependencies["igvm_manifest"])
-        isolation = config["guest_configs"][0].get("isolation_type")
-        snp = isolation.get("snp") if isinstance(isolation, dict) else None
-        if not isinstance(snp, dict):
-            raise ValueError("IGVM manifest is missing SNP isolation settings")
-        snp["enable_debug"] = enable_debug
+        config, resource_config = _generation_inputs(dependencies, initrd, configuration, enable_guest_debug)
         manifest.write_text(json.dumps(config, indent=2) + "\n",
                             encoding="utf-8")
         resources = work / "resources.json"
-        resources.write_text(json.dumps({
-            "resources": {
-                "linux_kernel": str(dependencies["kernel"]),
-                "linux_initrd": str(initrd),
-                "snp_bootshim": str(dependencies["snp_bootshim"]),
-            }
-        }, indent=2) + "\n", encoding="utf-8")
+        resources.write_text(json.dumps(resource_config, indent=2) + "\n", encoding="utf-8")
         generated = work / "image.igvm"
         _run(
             [str(dependencies["igvmfilegen"]), "manifest",
@@ -533,11 +596,11 @@ def build_igvm(
         _validate_generated_image(generated, stage)
 
         stage = "read-measurements"
-        measurements = {"snp": _snp_measurement(generated)}
+        measurements = _measurements(generated, configuration.isolation_type)
 
-        if key is not None:
+        if configuration.isolation_type == "snp" and key is not None:
             stage = "sign-id-block"
-            generated = _sign_igvm(
+            generated = _sign_snp_id_block(
                 dependencies["igvmfilegen"], generated, key, work, logger)
             stage = "add-snp-id-block"
             _validate_generated_image(generated, stage, signed=True)

@@ -13,28 +13,53 @@ import grpc
 from google.protobuf import empty_pb2
 from knack.util import CLIError
 
+from ._isolation import IsolationConfiguration, load_isolation, validate_configuration
 from .rpc import vmservice_pb2 as vm
 
 
-def create_request(image: Path, directory: Path, name: str) -> vm.CreateVMRequest:
-    """Build an SNP IGVM request with the supported COM1, CPU, memory, and PCIe configuration."""
+def _boot_personality(boot_mode: str) -> int:
+    """Map an implemented boot mode to its pinned RPC enum independently of isolation type."""
+    if boot_mode == 'linux_direct':
+        return vm.IgvmBoot.PERSONALITY_LINUX_DIRECT
+    raise ValueError('RPC boot mode is not implemented: ' + boot_mode)
+
+
+def validate_launch_configuration(configuration: IsolationConfiguration) -> None:
+    """Require implemented RPC isolation and boot mappings before starting a runtime."""
+    if configuration.isolation_type == 'snp':
+        validate_configuration(configuration)
+    else:
+        raise ValueError('RPC launch is not implemented for isolation type: ' + configuration.isolation_type)
+    _boot_personality(configuration.supported_configuration.boot_mode)
+
+
+def create_request(image: Path, directory: Path, name: str,
+                   configuration: Optional[IsolationConfiguration] = None) -> vm.CreateVMRequest:
+    """Map isolation-specific boot settings and shared resources/devices to the pinned RPC."""
+    configuration = configuration if configuration is not None else load_isolation()
+    validate_launch_configuration(configuration)
     request = vm.CreateVMRequest(log_id=name)
     config = request.config
     config.igvm.igvm_path = str(image)
-    config.igvm.personality = vm.IgvmBoot.PERSONALITY_LINUX_DIRECT
-    # Selecting the empty SNP submessage is essential: an absent isolation config means no isolation.
-    config.isolation_config.snp.SetInParent()
-    config.disable_vmbus = True
-    config.disable_hv = False
-    config.memory_config.memory_mb = 160
-    config.processor_config.processor_count = 1
+    config.igvm.personality = _boot_personality(configuration.supported_configuration.boot_mode)
+    if configuration.isolation_type == 'snp':
+        # An absent isolation config means no isolation, not an implicit SNP selection.
+        config.isolation_config.snp.SetInParent()
+    else:
+        raise ValueError('RPC isolation mapping is not implemented for isolation type: ' + configuration.isolation_type)
+    config.disable_vmbus = configuration.runtime.disable_vmbus
+    config.disable_hv = configuration.runtime.disable_hv
+    config.memory_config.memory_mb = configuration.defaults.memory_mib
+    config.processor_config.processor_count = configuration.defaults.processor_count
     # COM1 is zero-indexed in RPC and connects to the supervisor's serial listener.
-    config.serial_config.ports.add(port=0, socket_path=str(directory / 'serial.sock'), connect=True)
+    config.serial_config.ports.add(
+        port=configuration.serial_port, socket_path=str(directory / 'serial.sock'), connect=True)
     # The PCIe layout must match the image's measured pcie_host_bridge configuration.
+    pcie = configuration.pcie
     root = config.pcie.root_complexes.add(
-        name='rc0', segment=0, start_bus=0, end_bus=1,
-        low_mmio=16 * 1024 * 1024, low_mmio_base=0xf7000000,
-        high_mmio=1024 * 1024, high_mmio_base=0x100000000)
+        name='rc0', segment=pcie.segment, start_bus=pcie.start_bus, end_bus=pcie.end_bus,
+        low_mmio=pcie.low_mmio_size, low_mmio_base=pcie.low_mmio_base,
+        high_mmio=pcie.high_mmio_size, high_mmio_base=pcie.high_mmio_base)
     port = root.root_ports.add(name='vsock')
     port.attached.device.virtio.vsock.socket_path = str(directory / 'vsock.sock')
     return request
