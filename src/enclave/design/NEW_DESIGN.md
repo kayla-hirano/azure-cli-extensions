@@ -75,12 +75,7 @@ Require explicit `--isolation-type` for create and setup; there is no CLI
 default. Reject omission before side effects. Launch reads image identity
 instead, retaining the legacy SNP compatibility rules below.
 
-Package one versioned isolation manifest JSON per type with the extension,
-sharing defaults and supported settings between create and launch. This is
-extension metadata, not a per-image file or executable plugin.
-Store selected values in supported IGVM fields or agreed embedded metadata.
-Launch validates them, configures the runtime, and saves effective settings in
-instance state; it does not resize or rewrite the image.
+Refer to ISOLATION_TYPES_DESIGN.md for more details on the abstraction work. **Note:** that Create will use the bundle’s IGVM recipe; launch will use snp.json manifest. These configurations must be kept compatible externally by updating and validating them together during bundle preparation/release—particularly architecture, boot/isolation type, CPU count, memory size (accounting for units), and device layout. The extension does not check synchronization between them. When we eventually pick up this item, we may want to revisit this behavior and see if we can merge these together.
 
 #### Property classification and validation
 

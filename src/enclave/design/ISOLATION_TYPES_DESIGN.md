@@ -28,6 +28,8 @@ requires an SNP-shaped report. Instance records do not identify isolation.
 - Add focused manifest validation, installed-wheel resource lookup, and
   regression tests, with documentation updates for this refactor.
 
+**Note:** Create will use the bundle’s IGVM recipe; launch will use snp.json manifest. These configurations must be kept compatible externally by updating and validating them together during bundle preparation/release—particularly architecture, boot/isolation type, CPU count, memory size (accounting for units), and device layout. The extension does not check synchronization between them.
+
 ### Out of scope / deferred
 
 - `--isolation-type`, IGVM platform inspection/discovery/selection, and
