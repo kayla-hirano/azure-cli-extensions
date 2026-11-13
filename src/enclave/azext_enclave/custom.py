@@ -33,15 +33,28 @@ def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str]
                    signing_key: Optional[str] = None,
                    application: Optional[str] = None, keep_intermediates: bool = False) -> dict:
     """Compose an IGVM from trusted dependencies and a packaged or caller-supplied application."""
-    from ._image_builder import IgvmBuildError, build_igvm
+    from ._image_builder import IgvmBuildError, SnpBuildOptions, build_igvm, validate_build_configuration
+    from ._isolation import load_isolation
+    try:
+        configuration = load_isolation()
+        enable_guest_debug = '--debug' in cmd.cli_ctx.data['safe_params']
+        isolation_options: Optional[SnpBuildOptions] = None
+        if signing_key is not None:
+            if configuration.isolation_type != 'snp':
+                raise ValueError(
+                    'SNP ID-block signing is not supported for isolation type: ' + configuration.isolation_type)
+            isolation_options = SnpBuildOptions(signing_key=Path(signing_key).expanduser())
+        isolation_options = validate_build_configuration(
+            configuration, isolation_options=isolation_options, enable_guest_debug=enable_guest_debug)
+    except (OSError, ValueError) as error:
+        raise CLIError('Unable to create Enclave image: {}'.format(error)) from error
     bundle = Path(dependency_bundle).expanduser() if dependency_bundle is not None else DEFAULT_DEPENDENCY_BUNDLE
     if dependency_bundle is None and not bundle.is_file():
         raise CLIError(
             'The packaged dependency bundle is missing at {}. Reinstall the extension, '
             'or supply --dependency-bundle with a trusted archive '
             'or bundle directory.'.format(bundle))
-    enable_debug = '--debug' in cmd.cli_ctx.data['safe_params']
-    if enable_debug:
+    if enable_guest_debug:
         logger.warning(
             'Debug mode is enabled. Secure Key Release (SKR) policies that require a non-debug enclave '
             'will deny key release. For testing, ensure your SKR policy explicitly allows debug-enabled '
@@ -54,10 +67,11 @@ def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str]
                          else DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'),
             workspace=Path(workspace).expanduser() if workspace is not None else None,
             output=Path(output_file).expanduser(),
-            signing_key=Path(signing_key).expanduser() if signing_key is not None else None,
             keep_intermediates=keep_intermediates,
-            enable_debug=enable_debug,
-            logger=logger)
+            enable_guest_debug=enable_guest_debug,
+            isolation_options=isolation_options,
+            logger=logger,
+            configuration=configuration)
     except IgvmBuildError as error:
         detail = 'Unable to create Enclave image: {}'.format(error)
         if error.workspace is not None:
