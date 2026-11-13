@@ -1061,7 +1061,8 @@ class ImageBuilderTest(unittest.TestCase):
         """Reject unsupported recipe structures and invalid PCIe fields without rewriting caller inputs."""
         recipe = self.inputs.bundle / 'igvm_manifest'
         original = recipe.read_bytes()
-        for change in ('architecture', 'boot_mode', 'isolation', 'missing_layout_field', 'boolean_layout'):
+        for change in ('architecture', 'boot_mode', 'isolation', 'missing_layout_field', 'boolean_layout',
+                       'boolean_processor_count', 'boolean_memory_page_count'):
             with self.subTest(change=change):
                 document = json.loads(original)
                 guest = document['guest_configs'][0]
@@ -1073,8 +1074,10 @@ class ImageBuilderTest(unittest.TestCase):
                     guest['isolation_type'] = {'tdx': {}}
                 elif change == 'missing_layout_field':
                     del guest['image']['snp_linux_direct']['pcie_host_bridge']['segment']
-                else:
+                elif change == 'boolean_layout':
                     guest['image']['snp_linux_direct']['pcie_host_bridge']['segment'] = False
+                else:
+                    guest['image']['snp_linux_direct'][change[len('boolean_'):]] = True
                 data = json.dumps(document).encode()
                 recipe.write_bytes(data)
                 self.inputs.manifest['artifacts']['igvm_manifest']['sha256'] = hashlib.sha256(data).hexdigest()

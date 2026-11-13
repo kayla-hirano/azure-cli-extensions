@@ -169,10 +169,11 @@ def _snp_recipe(guest: dict) -> None:
         "low_mmio_base", "low_mmio_size", "high_mmio_base", "high_mmio_size",
     }
     if (not isinstance(bridge, dict) or set(bridge) != fields
-            or any(type(value) is not int or value < 0 for value in bridge.values())):
+            or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in bridge.values())):
         raise ValueError("IGVM manifest has missing or invalid measured PCIe settings")
     for field in ("processor_count", "memory_page_count"):
-        if type(linux.get(field)) is not int or linux[field] <= 0:
+        value = linux.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError("IGVM manifest has invalid " + field)
 
 

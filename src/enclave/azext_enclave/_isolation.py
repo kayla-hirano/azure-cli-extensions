@@ -51,8 +51,9 @@ class RuntimeConfiguration:
     disable_hv: bool
 
 
+# The attribute count reflects one cohesive PCIe schema, not multiple responsibilities.
 @dataclass(frozen=True)
-class PcieConfiguration:
+class PcieConfiguration:  # pylint: disable=too-many-instance-attributes
     """Measured PCIe address map, with byte-valued addresses and extents."""
 
     segment: int
@@ -65,8 +66,9 @@ class PcieConfiguration:
     high_mmio_size: int
 
 
+# This immutable manifest record already groups related settings into nested dataclasses.
 @dataclass(frozen=True)
-class IsolationConfiguration:
+class IsolationConfiguration:  # pylint: disable=too-many-instance-attributes
     """Validated support/dependency contracts and launch settings, not a generator recipe.
 
     Create validates this metadata and uses its support/dependency contracts,
@@ -122,7 +124,7 @@ def _object(value: object, fields: str, location: str) -> dict:
 
 def _integer(value: object, minimum: int, maximum: int, location: str) -> int:
     """Validate an inclusive numeric bound without accepting booleans as integers."""
-    if type(value) is not int or not minimum <= value <= maximum:
+    if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
         raise ValueError('Invalid isolation manifest {}: expected integer in [{}, {}]'.format(
             location, minimum, maximum))
     return value
@@ -155,7 +157,7 @@ def parse_manifest(document: object, isolation_type: str) -> IsolationConfigurat
     cpu = _integer(defaults['processor_count'], 1, 0xffffffff, 'defaults.processor_count')
     memory = _integer(defaults['memory_mib'], 1, 0xffffffffffffffff // (1024 * 1024), 'defaults.memory_mib')
     runtime = _object(root['runtime'], 'backend disable_vmbus disable_hv', 'runtime')
-    if any(type(runtime[key]) is not bool for key in ('disable_vmbus', 'disable_hv')):
+    if any(not isinstance(runtime[key], bool) for key in ('disable_vmbus', 'disable_hv')):
         raise ValueError('Invalid isolation manifest runtime switches: expected booleans')
     devices = _object(root['devices'], 'serial pcie', 'devices')
     serial = _object(devices['serial'], 'port', 'devices.serial')
