@@ -25,7 +25,7 @@ from knack.util import CLIError
 from ._instance import (alive, check_private, cleanup_sockets, host_lock, identity,
                         instance_lock, instance_path, read_record, require_host, stop_owned,
                         write_record)
-from ._isolation import load_isolation
+from ._isolation import IsolationType, load_isolation
 from ._rpc import VmClient, create_request, validate_launch_configuration
 from ._runtime import resolve_runtime
 from .rpc import vmservice_pb2 as vm
@@ -81,7 +81,8 @@ def read_line(stream: Union[BufferedReader, BufferedRWPair], connection: Optiona
 def _validate_snp_response(value: object) -> None:
     """Check SNP evidence type, length, and hexadecimal encoding without verifying attestation."""
     evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
-    report = evidence.get('report') if isinstance(evidence, dict) and evidence.get('tee') == 'snp' else None
+    report = (evidence.get('report')
+              if isinstance(evidence, dict) and evidence.get('tee') == IsolationType.SNP else None)
     if not isinstance(report, str) or len(report) != 2368:
         raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
     try:
@@ -90,14 +91,14 @@ def _validate_snp_response(value: object) -> None:
         raise CLIError('Guest SNP report is not valid hexadecimal.') from error
 
 
-def _guest_response_validator(isolation_type: str) -> Callable[[object], None]:
+def _guest_response_validator(isolation_type: IsolationType) -> Callable[[object], None]:
     """Select an implemented evidence-shape validator before opening the guest connection."""
-    if isolation_type == 'snp':
+    if isolation_type == IsolationType.SNP:
         return _validate_snp_response
     raise CLIError('Guest readiness is not implemented for isolation type: ' + isolation_type)
 
 
-def probe_guest(directory: Path, deadline: float, isolation_type: str = 'snp') -> None:
+def probe_guest(directory: Path, deadline: float, isolation_type: IsolationType = IsolationType.SNP) -> None:
     """Retry the shared guest exchange and retain evidence after type-specific shape checks."""
     validate_response = _guest_response_validator(isolation_type)
     last_error = 'Guest relay has not become available.'

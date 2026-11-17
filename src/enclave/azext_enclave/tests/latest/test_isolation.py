@@ -25,7 +25,7 @@ class IsolationManifestTest(unittest.TestCase):
     def test_installed_resource_lookup_is_explicit(self) -> None:
         """Load the enabled packaged manifest while rejecting unknown types and caller-supplied paths."""
         configuration = _isolation.load_isolation()
-        self.assertEqual(configuration.isolation_type, 'snp')
+        self.assertIs(configuration.isolation_type, _isolation.IsolationType.SNP)
         self.assertEqual(configuration.dependency_bundle.profile, 'measured-pcie-v1')
         self.assertEqual(configuration.image.command_line, self.document['image']['command_line'])
         with patch.object(_isolation.resources, 'files') as lookup:

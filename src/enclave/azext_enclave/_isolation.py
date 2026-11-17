@@ -10,13 +10,24 @@ can define their own manifest structure and parser.
 """
 
 from dataclasses import dataclass
+from enum import Enum
 from importlib import resources
 import json
 from pathlib import PurePosixPath
-from typing import Tuple
+from typing import Tuple, Union
 
 
-_ENABLED_MANIFESTS = {'snp': 'manifests/snp.json'}
+class IsolationType(str, Enum):
+    """Isolation types recognized by the extension, using their manifest values."""
+
+    SNP = 'snp'
+
+    def __str__(self) -> str:
+        """Preserve the manifest value in diagnostics and formatted output."""
+        return self.value
+
+
+_ENABLED_MANIFESTS = {IsolationType.SNP: 'manifests/snp.json'}
 _SNP_ARTIFACTS = {'kernel', 'base_initrd', 'snp_bootshim', 'igvmfilegen', 'igvm_manifest'}
 
 
@@ -87,7 +98,7 @@ class IsolationConfiguration:  # pylint: disable=too-many-instance-attributes
     """
 
     schema_version: int
-    isolation_type: str
+    isolation_type: IsolationType
     supported_configuration: SupportedConfiguration
     dependency_bundle: DependencyBundle
     defaults: ResourceDefaults
@@ -101,7 +112,7 @@ class IsolationConfiguration:  # pylint: disable=too-many-instance-attributes
 def validate_configuration(configuration: IsolationConfiguration) -> None:
     """Validate backend requirements and the type-specific contract independently of operation support."""
     _validate_backend(configuration.runtime.backend, configuration.character_devices)
-    if configuration.isolation_type == 'snp':
+    if configuration.isolation_type == IsolationType.SNP:
         _validate_snp_configuration(configuration)
     else:
         raise ValueError('Unsupported isolation configuration type: {}'.format(configuration.isolation_type))
@@ -179,7 +190,7 @@ def _parse_snp_manifest(document: object) -> IsolationConfiguration:
     root = _object(document, 'schema_version isolation_type supported_configuration dependency_bundle '
                    'defaults image runtime devices host_requirements', 'root')
     _integer(root['schema_version'], 1, 1, 'schema_version')
-    if root['isolation_type'] != 'snp':
+    if root['isolation_type'] != IsolationType.SNP:
         raise ValueError('Isolation manifest type does not match snp')
     supported = SupportedConfiguration(**_object(
         root['supported_configuration'], 'architecture boot_mode device_layout', 'supported_configuration'))
@@ -205,23 +216,23 @@ def _parse_snp_manifest(document: object) -> IsolationConfiguration:
            or '..' in PurePosixPath(path).parts for path in character_devices):
         raise ValueError('Invalid isolation manifest host character device paths')
     configuration = IsolationConfiguration(
-        1, 'snp', supported, DependencyBundle(1, bundle['profile'], required),
+        1, IsolationType(root['isolation_type']), supported, DependencyBundle(1, bundle['profile'], required),
         ResourceDefaults(cpu, memory), image, RuntimeConfiguration(**runtime), serial_port,
         pcie, character_devices)
     validate_configuration(configuration)
     return configuration
 
 
-def parse_manifest(document: object, isolation_type: str) -> IsolationConfiguration:
+def parse_manifest(document: object, isolation_type: Union[str, IsolationType]) -> IsolationConfiguration:
     """Dispatch to the selected type's parser without assuming a shared manifest format."""
     if isolation_type not in _ENABLED_MANIFESTS:
         raise ValueError('Isolation type is not enabled: {}'.format(isolation_type))
-    if isolation_type == 'snp':
+    if isolation_type == IsolationType.SNP:
         return _parse_snp_manifest(document)
     raise ValueError('Unsupported isolation configuration type: {}'.format(isolation_type))
 
 
-def load_isolation(isolation_type: str = 'snp') -> IsolationConfiguration:
+def load_isolation(isolation_type: Union[str, IsolationType] = IsolationType.SNP) -> IsolationConfiguration:
     """Read only explicitly enabled, installed package resources, without discovery or downloads."""
     if isolation_type not in _ENABLED_MANIFESTS:
         raise ValueError('Isolation type is not enabled: {}'.format(isolation_type))
