@@ -60,7 +60,7 @@ setup(
     packages=find_packages(),
     install_requires=DEPENDENCIES,
     package_data={'azext_enclave': [
-        'azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi',
+        'azext_metadata.json', 'rpc/*.proto', 'rpc/*.pyi', 'manifests/*.json',
         'dependencies/dependencies.tar.gz', 'dependencies/enclave_app',
         'dependencies/initramfs/enclave-init',
     ]},

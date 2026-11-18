@@ -6,6 +6,7 @@
 """Check the OpenVMM protobuf and gRPC transport contract."""
 
 import time
+from dataclasses import replace
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,11 +17,66 @@ from google.protobuf.empty_pb2 import Empty
 from knack.util import CLIError
 
 from azext_enclave import _rpc
+from azext_enclave._isolation import load_isolation
 from azext_enclave.rpc import vmservice_pb2 as vm
 
 
 class RpcContractTest(unittest.TestCase):
     """Check protobuf mapping and the wire contract independently of OpenVMM execution."""
+
+    def test_request_consumes_resolved_manifest_settings(self) -> None:
+        """Serialize resolved resource, runtime, serial, PCIe, and explicit SNP settings into the RPC request."""
+        configuration = load_isolation()
+        configuration = replace(
+            configuration, defaults=replace(configuration.defaults, processor_count=2, memory_mib=256),
+            runtime=replace(configuration.runtime, disable_hv=True, disable_vmbus=False), serial_port=1,
+            pcie=replace(configuration.pcie, segment=1, start_bus=2, end_bus=3,
+                         low_mmio_base=0xe0000000, low_mmio_size=0x200000,
+                         high_mmio_base=0x200000000, high_mmio_size=0x400000))
+        request = _rpc.create_request(Path('image'), Path('instance'), 'demo', configuration)
+        config = vm.CreateVMRequest.FromString(request.SerializeToString()).config
+        self.assertEqual(config.processor_config.processor_count, 2)
+        self.assertEqual(config.memory_config.memory_mb, 256)
+        self.assertFalse(config.disable_vmbus)
+        self.assertTrue(config.disable_hv)
+        self.assertEqual(config.serial_config.ports[0].port, 1)
+        self.assertTrue(config.serial_config.ports[0].connect)
+        root = config.pcie.root_complexes[0]
+        self.assertEqual((root.segment, root.start_bus, root.end_bus), (1, 2, 3))
+        self.assertEqual((root.low_mmio_base, root.low_mmio), (0xe0000000, 0x200000))
+        self.assertEqual((root.high_mmio_base, root.high_mmio), (0x200000000, 0x400000))
+        self.assertEqual(config.isolation_config.WhichOneof('isolation_type'), 'snp')
+
+    def test_request_rejects_unimplemented_isolation_and_boot_modes(self) -> None:
+        """Reject isolation, backend, and boot combinations without an implemented RPC launch path."""
+        configuration = load_isolation()
+        for unsupported in (
+                replace(configuration, isolation_type='tdx'),
+                replace(configuration, runtime=replace(configuration.runtime, backend='kvm')),
+                replace(configuration, supported_configuration=replace(
+                    configuration.supported_configuration, boot_mode='uefi'))):
+            with self.subTest(configuration=unsupported), self.assertRaisesRegex(
+                    ValueError, 'RPC launch is not implemented|Unsupported runtime backend|only SNP'):
+                _rpc.create_request(Path('image'), Path('instance'), 'demo', unsupported)
+
+    def test_unmapped_boot_mode_is_rejected_by_preflight_and_request_mapping(self) -> None:
+        """Require a boot personality mapping in both launch preflight and request construction."""
+        configuration = load_isolation()
+        configuration = replace(configuration, supported_configuration=replace(
+            configuration.supported_configuration, boot_mode='uefi'))
+        with patch.object(_rpc, 'validate_configuration'):
+            with self.assertRaisesRegex(ValueError, 'RPC boot mode is not implemented: uefi'):
+                _rpc.validate_launch_configuration(configuration)
+        with patch.object(_rpc, 'validate_launch_configuration'):
+            with self.assertRaisesRegex(ValueError, 'RPC boot mode is not implemented: uefi'):
+                _rpc.create_request(Path('image'), Path('instance'), 'demo', configuration)
+
+    def test_unmapped_rpc_isolation_never_produces_a_non_confidential_request(self) -> None:
+        """Fail on an unmapped isolation type rather than emitting a request with isolation absent."""
+        configuration = replace(load_isolation(), isolation_type='tdx')
+        with patch.object(_rpc, 'validate_launch_configuration'):
+            with self.assertRaisesRegex(ValueError, 'RPC isolation mapping is not implemented'):
+                _rpc.create_request(Path('image'), Path('instance'), 'demo', configuration)
 
     def test_request_preserves_enclave_configuration(self):
         """Round-trip the request and verify the supported boot, resource, and device configuration."""

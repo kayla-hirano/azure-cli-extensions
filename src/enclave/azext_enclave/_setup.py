@@ -17,6 +17,7 @@ from azure.cli.core.util import user_confirmation
 from knack.log import get_logger
 from knack.util import CLIError
 
+from ._isolation import load_isolation
 from ._runtime import RUNTIME_PACKAGE, RUNTIME_PATH, resolve_runtime
 
 logger = get_logger(__name__)
@@ -24,6 +25,9 @@ logger = get_logger(__name__)
 
 def setup_host(yes: bool = False) -> dict:
     """Check the host before offering a bounded, version-specific package installation."""
+    configuration = load_isolation()
+    if configuration.runtime.backend != 'mshv':
+        raise ValueError('Host setup is not implemented for backend: ' + configuration.runtime.backend)
     if sys.platform != 'linux':
         raise CLIError('Enclave setup must run locally on Azure Linux 3 L1.')
     if os.geteuid() != 0:
@@ -33,11 +37,12 @@ def setup_host(yes: bool = False) -> dict:
     if release.get('ID', '').strip('"\'') != 'azurelinux' \
             or release.get('VERSION_ID', '').strip('"\'') != '3.0':
         raise CLIError('Automatic Enclave setup supports Azure Linux 3.0 only; no system changes were made.')
-    device = Path('/dev/mshv')
-    if not device.exists() or not stat.S_ISCHR(device.stat().st_mode):
-        raise CLIError(
-            'A compatible L1 kernel exposing the /dev/mshv character device is required. '
-            'Provision the kernel separately; Enclave setup does not change kernels or reboot.')
+    for required in configuration.character_devices:
+        device = Path(required)
+        if not device.exists() or not stat.S_ISCHR(device.stat().st_mode):
+            raise CLIError(
+                'A compatible L1 kernel exposing the {} character device is required. '
+                'Provision the kernel separately; Enclave setup does not change kernels or reboot.'.format(required))
     if not shutil.which('rpm'):
         raise CLIError('RPM is required to verify OpenVMM. Use an Azure Linux host with rpm installed.')
     if not Path(RUNTIME_PATH).exists():
@@ -62,5 +67,5 @@ def setup_host(yes: bool = False) -> dict:
                 .format(result.stderr.strip() or result.stdout.strip() or 'tdnf exited {}'.format(result.returncode)))
     # Existing installations must also pass the same version/integrity checks used by launch.
     executable = resolve_runtime(RUNTIME_PATH)
-    logger.warning('Host prerequisites verified; an SNP guest boot and attestation have not been verified.')
+    logger.warning('Host prerequisites verified; guest boot and attestation have not been verified.')
     return {'status': 'ready', 'os': 'Azure Linux 3.0', 'kernel': platform.release(), 'openvmm': str(executable)}

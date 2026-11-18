@@ -24,6 +24,15 @@ from ._helpers import LinuxFilesystemTest
 class RelayLineTest(unittest.TestCase):
     """Check bounded relay reads independently of guest startup."""
 
+    def test_unimplemented_readiness_fails_before_guest_exchange(self) -> None:
+        """Reject unsupported isolation evidence handling before reading runtime state or opening a connection."""
+        with patch('azext_enclave._lifecycle.read_record') as read, \
+                patch('azext_enclave._lifecycle.socket.socket') as connect:
+            with self.assertRaisesRegex(CLIError, 'Guest readiness is not implemented for isolation type: tdx'):
+                _lifecycle.probe_guest(Path('unused'), time.monotonic() + 5, 'tdx')
+            read.assert_not_called()
+            connect.assert_not_called()
+
     def test_line_limits(self):
         """Retry empty connections but reject oversized or incomplete relay lines."""
         self.assertEqual(_lifecycle.read_line(io.BufferedReader(io.BytesIO(b'OK 4050\n'))), b'OK 4050\n')
@@ -34,6 +43,7 @@ class RelayLineTest(unittest.TestCase):
                 _lifecycle.read_line(io.BufferedReader(io.BytesIO(line)))
 
     def test_buffered_lines_preserve_handshake_and_response_boundaries(self) -> None:
+        """Read a buffered handshake and response separately without losing bytes between relay lines."""
         response = json.dumps({'evidence': {'tee': 'snp', 'report': 'ab' * 1184}}).encode() + b'\n'
         with io.BufferedReader(io.BytesIO(b'OK 4050\n' + response)) as incoming:
             stream = MagicMock(wraps=incoming)
@@ -45,6 +55,7 @@ class RelayLineTest(unittest.TestCase):
             self.assertEqual(connection.settimeout.call_count, 2)
 
     def test_line_size_limit_includes_newline(self) -> None:
+        """Accept relay lines at the size limit and count their terminating newline toward that limit."""
         with patch('azext_enclave._lifecycle.MAX_LINE_BYTES', 16):
             for size in (15, 16, 17):
                 with self.subTest(size=size), io.BufferedReader(
@@ -56,6 +67,7 @@ class RelayLineTest(unittest.TestCase):
                             _lifecycle.read_line(stream)
 
     def test_chunked_read_rechecks_total_deadline(self) -> None:
+        """Stop a partial relay read when the original deadline expires between buffered chunks."""
         stream = MagicMock()
         stream.peek.side_effect = [b'O', b'K\n']
         stream.read.return_value = b'O'
@@ -77,6 +89,7 @@ class GuestProbeTest(LinuxFilesystemTest):
     """Test the existing relay protocol and the stronger SNP-shape readiness check."""
 
     def test_probe_flushes_buffered_requests_over_real_socket(self) -> None:
+        """Flush the relay handshake and guest request so a real socket peer can respond."""
         response = json.dumps({'evidence': {'tee': 'snp', 'report': '00' * 1184}}).encode() + b'\n'
         client, server = socket.socketpair()
         self.addCleanup(client.close)
