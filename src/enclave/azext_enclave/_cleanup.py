@@ -32,22 +32,26 @@ def archive_path(name: str, create: bool = False) -> Path:
 
 
 def staging_path(archive: Path) -> Path:
+    """Return the unpublished staging directory for an archive."""
     return archive.with_name('.' + archive.name + '.staging')
 
 
 def _directory_identity(directory: Path) -> list:
+    """Validate a private directory and return its filesystem identity."""
     check_private(directory)
     info = directory.lstat()
     return [info.st_dev, info.st_ino]
 
 
 def _regular_file(path: Path, directory_fd: Optional[int] = None) -> os.stat_result:
+    """Validate a file without following its final symlink."""
     info = path.lstat() if directory_fd is None else os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
     _validate_file_info(path, info)
     return info
 
 
 def _validate_file_info(path: Path, info: os.stat_result) -> None:
+    """Reject files that are not private, owned regular files without hard links."""
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
             or info.st_mode & 0o077 or info.st_nlink != 1):
         raise CLIError('Expected a private, owned regular file without links: {}'.format(path))
@@ -69,6 +73,7 @@ def read_private_record(path: Path) -> dict:
 
 
 def _digest(path: Path) -> dict:
+    """Hash a private log and reject changes while reading it."""
     before = _regular_file(path)
     descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     digest = hashlib.sha256()
@@ -87,6 +92,7 @@ def _digest(path: Path) -> dict:
 
 
 def _validate_archive(path: Path, expected: dict) -> None:
+    """Verify staged logs exactly match the captured inventory."""
     check_private(path)
     if {entry.name for entry in path.iterdir()} != set(expected):
         raise CLIError('Archive contents do not match the captured log inventory: {}'.format(path))
@@ -96,6 +102,7 @@ def _validate_archive(path: Path, expected: dict) -> None:
 
 
 def _publish(source: Path, destination: Path) -> None:
+    """Publish a staged archive atomically without replacing a destination."""
     # renameat2 keeps publication atomic without replacing even an empty colliding directory.
     try:
         rename = ctypes.CDLL('libc.so.6', use_errno=True).renameat2
@@ -110,6 +117,7 @@ def _publish(source: Path, destination: Path) -> None:
 
 
 def _copy_log(source: Path, target: Path, expected: dict) -> None:
+    """Copy a private log while verifying its contents and stability."""
     _regular_file(source)
     descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, 'wb') as output:
@@ -136,6 +144,7 @@ def _copy_log(source: Path, target: Path, expected: dict) -> None:
 
 
 def _archive(directory: Path, logs: dict) -> Path:
+    """Stage, verify, and publish an instance's logs."""
     archive = archive_path(directory.name, create=True)
     staging = staging_path(archive)
     if archive.exists() or archive.is_symlink():
@@ -151,6 +160,7 @@ def _archive(directory: Path, logs: dict) -> Path:
 
 
 def _inventory(directory: Path, expected: object) -> dict:
+    """Capture existing logs and reject missing logs that were expected."""
     logs = {}
     if not isinstance(expected, list) or not all(isinstance(name, str) and name in LOG_NAMES for name in expected):
         raise CLIError('Missing or invalid expected log inventory: {}'.format(directory / 'instance.json'))
@@ -167,6 +177,7 @@ def _inventory(directory: Path, expected: object) -> dict:
 
 
 def _remove_instance(directory: Path, expected_identity: list) -> None:
+    """Remove only known private files from the original instance directory."""
     if _directory_identity(directory) != expected_identity:
         raise CLIError('Instance directory was replaced; refusing removal: {}'.format(directory))
     descriptor = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -198,6 +209,7 @@ def _remove_instance(directory: Path, expected_identity: list) -> None:
 
 
 def _record_failure(directory: Path, state: dict, expected_identity: list, error: BaseException) -> None:
+    """Record a cleanup failure when the original instance state remains available."""
     state.update(status='cleanup-failed', cleanup_error=str(error) or 'Cleanup interrupted.')
     try:
         if _directory_identity(directory) != expected_identity:
@@ -210,6 +222,7 @@ def _record_failure(directory: Path, state: dict, expected_identity: list, error
 
 
 def finalization_error(directory: Path, state: dict, error: BaseException) -> CLIError:
+    """Describe incomplete cleanup and the paths needed for recovery."""
     archive = Path(ARCHIVE_ROOT) / directory.name
     reason = str(error) or 'Cleanup interrupted.'
     previous_error = state.get('cleanup_error')

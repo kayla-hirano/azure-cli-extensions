@@ -186,7 +186,7 @@ def _file_digest(path: Path) -> str:
 
 
 def _start_supervisor(directory: Path, state: dict, host_lock_fd: int) -> None:
-    """Start the persistent OpenVMM owner and save its process identity."""
+    """Create expected logs, then start the persistent OpenVMM owner and save its identity."""
     environment = os.environ.copy()
     environment['PYTHONPATH'] = str(Path(__file__).resolve().parent.parent) + (
         os.pathsep + environment['PYTHONPATH'] if environment.get('PYTHONPATH') else '')
@@ -362,13 +362,13 @@ def _prepare_destroy(directory: Path, name: str, no_logs: bool) -> Tuple[dict, d
         runtime = read_private_record(runtime_path)
         if not runtime:
             raise CLIError('Empty runtime ownership record; shutdown cannot be confirmed: {}'.format(runtime_path))
-    if runtime and state.get('supervisor') is None:
-        _validate_process(runtime.get('supervisor'))
-        _validate_process(runtime.get('openvmm'))
+    recover_supervisor = bool(runtime) and state.get('supervisor') is None
+    supervisor = runtime.get('supervisor') if recover_supervisor else state.get('supervisor')
+    _validate_ownership(supervisor, runtime)
+    if recover_supervisor:
         logger.warning('Recovering the missing supervisor identity from the owned runtime record: %s', runtime_path)
-        state['supervisor'] = runtime['supervisor']
+        state['supervisor'] = supervisor
         write_record(directory / 'instance.json', state)
-    _validate_ownership(state.get('supervisor'), runtime)
     policy = 'discard' if no_logs else state.get('log_policy', 'retain')
     if policy not in ('retain', 'discard'):
         raise CLIError('Invalid persisted log policy; retain state for manual recovery: {}'.format(directory))

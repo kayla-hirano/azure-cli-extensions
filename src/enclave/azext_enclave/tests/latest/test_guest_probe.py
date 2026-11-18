@@ -8,6 +8,7 @@
 import io
 import json
 import socket
+import sys
 import tempfile
 import time
 import unittest
@@ -116,6 +117,8 @@ class GuestProbeTest(LinuxFilesystemTest):
                 _lifecycle.probe_guest(directory, time.monotonic() + 5)
             self.assertEqual(exchange.result(timeout=3)['payload'], 'hello world')
             self.assertEqual((directory / 'response.json').read_bytes(), response)
+            if sys.platform == 'linux':
+                self.assertEqual((directory / 'response.json').stat().st_mode & 0o077, 0)
 
     def test_probe_retries_empty_handshake_or_response(self) -> None:
         """Allow early relay closures during boot without accepting an empty guest response."""
