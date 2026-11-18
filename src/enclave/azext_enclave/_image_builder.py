@@ -26,7 +26,7 @@ import sys
 import tarfile
 import tempfile
 from typing import BinaryIO, Dict, List, NamedTuple, Optional, Sequence, Tuple
-from ._isolation import IsolationConfiguration, IsolationType, load_isolation, validate_configuration
+from ._isolation import IsolationConfiguration, IsolationType, load_isolation
 
 
 __all__ = ["IgvmBuildError", "IgvmBuildResult", "SnpBuildOptions", "build_igvm", "validate_build_configuration"]
@@ -231,11 +231,10 @@ def validate_build_configuration(
     configuration: IsolationConfiguration, *, isolation_options: Optional[SnpBuildOptions] = None,
     enable_guest_debug: bool = False,
 ) -> SnpBuildOptions:
-    """Validate support and resolve type-specific defaults before reading inputs."""
+    """Check build support for validated configuration and resolve type-specific defaults."""
     if isolation_options is not None and not isinstance(isolation_options, SnpBuildOptions):
         raise ValueError("Unsupported isolation build options: " + type(isolation_options).__name__)
     if configuration.isolation_type == IsolationType.SNP:
-        validate_configuration(configuration)
         return isolation_options if isolation_options is not None else SnpBuildOptions()
     if isolation_options is not None and isolation_options.signing_key is not None:
         raise ValueError("SNP ID-block signing is not supported for isolation type: " + configuration.isolation_type)
