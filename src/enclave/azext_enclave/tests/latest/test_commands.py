@@ -5,7 +5,10 @@
 
 """Verify Azure CLI registration, help, arguments, and delegation without launching a VM."""
 
+import io
+import json
 import shlex
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +20,7 @@ from azure.cli.core import get_default_cli
 from azext_enclave import EnclaveCommandsLoader
 from azext_enclave import custom
 from azext_enclave._help import helps
+from ._helpers import create_cli
 
 
 class EnclaveCommandTest(unittest.TestCase):
@@ -36,8 +40,8 @@ class EnclaveCommandTest(unittest.TestCase):
             'enclave setup': {'yes'},
             'enclave create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
                                'output_file', 'signing_key', 'keep_intermediates'},
-            'enclave launch': {'name', 'igvm', 'openvmm', 'timeout', 'allow_untested_runtime'},
-            'enclave destroy': {'name', 'timeout'},
+            'enclave launch': {'name_prefix', 'igvm', 'openvmm', 'timeout', 'allow_untested_runtime'},
+            'enclave destroy': {'name', 'timeout', 'no_logs'},
         }
         for command in ('enclave setup', 'enclave create', 'enclave launch', 'enclave destroy'):
             with self.subTest(command=command):
@@ -79,16 +83,6 @@ class EnclaveCommandTest(unittest.TestCase):
                                 self.assertTrue(options.intersection(argument.options_list),
                                                 'Example is missing required option: ' + name)
 
-    def test_lifecycle_delegation(self):
-        """Verify CLI defaults are passed unchanged to the lifecycle implementation."""
-        with patch('azext_enclave._lifecycle.launch', return_value={'status': 'running'}) as launch:
-            self.assertEqual(custom.launch_enclave('demo', 'demo.igvm'), {'status': 'running'})
-            launch.assert_called_once_with(
-                'demo', 'demo.igvm', 'openvmm', 120, False)
-        with patch('azext_enclave._lifecycle.destroy', return_value={'status': 'destroyed'}) as destroy:
-            self.assertEqual(custom.destroy_enclave('demo'), {'status': 'destroyed'})
-            destroy.assert_called_once_with('demo', 30)
-
     def test_setup_delegation(self) -> None:
         """Keep host preparation separate from Python dependency installation."""
         with patch('azext_enclave._setup.setup_host', return_value={'status': 'ready'}) as setup:
@@ -102,29 +96,53 @@ class EnclaveCommandTest(unittest.TestCase):
                 custom.setup_enclave()
 
     def test_lifecycle_results_hide_internal_state_without_mutating_it(self) -> None:
-        for operation, status in (('launch', 'running'), ('destroy', 'destroyed')):
-            with self.subTest(operation=operation):
-                supervisor = {'pid': 123, 'start': '456', 'boot': 'boot-id', 'command': 'command-hash'}
-                public = {
-                    'schema': 1, 'name': 'demo', 'status': status, 'igvm': 'demo.igvm',
-                    'igvm_sha256': 'image-hash',
-                    'vsock': {'port': 4050, 'socket': 'vsock.sock'},
-                    'rpc_socket': 'rpc.sock',
-                    'logs': {'openvmm': 'openvmm.log', 'supervisor': 'supervisor.log', 'com1': 'com1.log'},
-                    'instance_file': 'instance.json', 'response_file': 'response.json',
-                }
-                state = dict(public, attestation_verified=False, directory='instance-directory',
-                             openvmm='openvmm', openvmm_sha256='runtime-hash', supervisor=supervisor)
-                original = state.copy()
-                with patch('azext_enclave._lifecycle.' + operation, return_value=state):
-                    result = (custom.launch_enclave('demo', 'demo.igvm') if operation == 'launch'
-                              else custom.destroy_enclave('demo'))
-                self.assertEqual(result, dict(public, supervisor_pid=123))
-                self.assertEqual(state, original)
-                self.assertIsNot(result, state)
-                self.assertEqual(state['supervisor'], supervisor)
+        """Return public launch state without changing the saved ownership data."""
+        supervisor = {'pid': 123, 'start': '456', 'boot': 'boot-id', 'command': 'command-hash'}
+        public = {
+            'schema': 1, 'name': 'demo', 'status': 'running', 'igvm': 'demo.igvm',
+            'igvm_sha256': 'image-hash',
+            'vsock': {'port': 4050, 'socket': 'vsock.sock'},
+            'rpc_socket': 'rpc.sock',
+            'logs': {'openvmm': 'openvmm.log', 'supervisor': 'supervisor.log', 'com1': 'com1.log'},
+            'instance_file': 'instance.json', 'response_file': 'response.json',
+        }
+        state = dict(public, attestation_verified=False, directory='instance-directory',
+                     openvmm='openvmm', openvmm_sha256='runtime-hash', supervisor=supervisor,
+                     expected_logs=['com1.log'])
+        original = state.copy()
+        with patch('azext_enclave._lifecycle.launch', return_value=state):
+            result = custom.launch_enclave('demo.igvm', 'demo')
+        self.assertEqual(result, dict(public, supervisor_pid=123))
+        self.assertEqual(state, original)
+        self.assertIsNot(result, state)
+        self.assertEqual(state['supervisor'], supervisor)
+
+    def test_lifecycle_options_through_cli(self):
+        """Exercise launch prefixes and explicit log discard through the CLI."""
+        name = 'demo-01234567-89ab-4cde-8fab-0123456789ab'
+        for prefix_args, prefix in (([], 'enclave'), (['--name-prefix', 'demo'], 'demo')):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as directory:
+                cli, output = create_cli(directory), io.StringIO()
+                with patch('azext_enclave._lifecycle.launch', return_value={'name': name}) as launch:
+                    code = cli.invoke(
+                        ['enclave', 'launch', '--igvm', 'image.igvm', '--output', 'json'] + prefix_args,
+                        out_file=output)
+                self.assertEqual(code, 0, str(cli.result.error))
+                self.assertEqual(json.loads(output.getvalue())['name'], name)
+                launch.assert_called_once_with('image.igvm', prefix, 'openvmm', 120, False)
+        with tempfile.TemporaryDirectory() as directory:
+            cli, output = create_cli(directory), io.StringIO()
+            result = {'name': name, 'status': 'destroyed', 'log_disposition': 'discarded',
+                      'archive_path': None, 'removal_outcome': 'removed'}
+            with patch('azext_enclave._lifecycle.destroy', return_value=result) as destroy:
+                code = cli.invoke(
+                    ['enclave', 'destroy', '--name', name, '--no-logs', '--output', 'json'], out_file=output)
+            self.assertEqual(code, 0, str(cli.result.error))
+            self.assertEqual(json.loads(output.getvalue()), result)
+            destroy.assert_called_once_with(name, 30, True)
 
     def test_instance_result_without_supervisor(self) -> None:
+        """Omit the supervisor PID when no supervisor is recorded."""
         for supervisor in ({}, {'supervisor': None}):
             with self.subTest(supervisor=supervisor):
                 state = dict(supervisor, name='demo', status='destroyed')
