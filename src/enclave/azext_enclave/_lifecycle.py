@@ -29,7 +29,7 @@ from ._instance import (alive, check_private, cleanup_sockets, host_lock, identi
                         sync_directory, write_record)
 from ._cleanup import (LOG_NAMES, archive_path, finalize, finalization_error, read_private_record,
                        staging_path)
-from ._isolation import load_isolation
+from ._isolation import IsolationType, load_isolation
 from ._rpc import VmClient, create_request, validate_launch_configuration
 from ._runtime import resolve_runtime
 from .rpc import vmservice_pb2 as vm
@@ -127,8 +127,6 @@ def probe_guest(directory: Path, deadline: float, isolation_type: IsolationType 
                     response = read_line(stream, connection, deadline)
             value = json.loads(response)
             validate_response(value)
-            (directory / 'response.json').write_bytes(response)
-            return
         except OSError as error:
             last_error = str(error)
             logger.debug('Waiting for enclave application: %s', error)

@@ -146,6 +146,26 @@ class GuestProbeTest(LinuxFilesystemTest):
                     debug.assert_called_once()
                 self.assertEqual((directory / 'response.json').read_bytes(), response)
 
+    def test_probe_does_not_overwrite_existing_evidence(self) -> None:
+        """Retain existing evidence rather than replacing it after a successful guest exchange."""
+        response = json.dumps({'evidence': {'tee': 'snp', 'report': '00' * 1184}}).encode() + b'\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _instance.write_record(directory / 'runtime.json', {'openvmm': {}, 'supervisor': {}})
+            evidence = directory / 'response.json'
+            evidence.write_bytes(b'previous evidence')
+            stream = MagicMock()
+            with io.BufferedReader(io.BytesIO(b'OK 4050\n' + response)) as incoming:
+                stream.peek.side_effect = incoming.peek
+                stream.read.side_effect = incoming.read
+                with patch('azext_enclave._lifecycle.alive', return_value=True), \
+                        patch('azext_enclave._lifecycle.socket.socket') as factory:
+                    connection = factory.return_value.__enter__.return_value
+                    connection.makefile.return_value.__enter__.return_value = stream
+                    with self.assertRaises(FileExistsError):
+                        _lifecycle.probe_guest(directory, time.monotonic() + 5)
+            self.assertEqual(evidence.read_bytes(), b'previous evidence')
+
     def test_probe_empty_connections_respect_deadline(self) -> None:
         """Keep repeated early closures bounded by the original readiness budget."""
         with tempfile.TemporaryDirectory() as temporary:
