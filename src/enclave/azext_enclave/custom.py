@@ -16,7 +16,6 @@ from knack.util import CLIError
 logger = get_logger(__name__)
 DEPENDENCIES_DIR = Path(__file__).parent / 'dependencies'
 DEFAULT_DEPENDENCY_BUNDLE = DEPENDENCIES_DIR / 'dependencies.tar.gz'
-DEFAULT_APPLICATION = DEPENDENCIES_DIR / 'enclave_app'
 
 
 def setup_enclave(yes: bool = False) -> dict:
@@ -28,11 +27,11 @@ def setup_enclave(yes: bool = False) -> dict:
         raise CLIError('Unable to set up Enclave host: {}'.format(error)) from error
 
 
-def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str] = None,
+def create_enclave(cmd: AzCliCommand, output_file: str, application: str, workspace: Optional[str] = None,
                    dependency_bundle: Optional[str] = None, init_script: Optional[str] = None,
                    signing_key: Optional[str] = None,
-                   application: Optional[str] = None, keep_intermediates: bool = False) -> dict:
-    """Compose an IGVM from trusted dependencies and a packaged or caller-supplied application."""
+                   keep_intermediates: bool = False) -> dict:
+    """Compose an IGVM from trusted dependencies and a caller-supplied application."""
     from ._image_builder import IgvmBuildError, SnpBuildOptions, build_igvm, validate_build_configuration
     from ._isolation import IsolationType, load_isolation
     try:
@@ -62,7 +61,7 @@ def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str]
     try:
         result = build_igvm(
             dependency_bundle=bundle,
-            application=Path(application).expanduser() if application is not None else DEFAULT_APPLICATION,
+            application=Path(application).expanduser(),
             init_script=(Path(init_script).expanduser() if init_script is not None
                          else DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'),
             workspace=Path(workspace).expanduser() if workspace is not None else None,

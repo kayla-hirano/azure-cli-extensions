@@ -31,9 +31,10 @@ helps['enclave setup'] = """
 
 helps['enclave create'] = """
     type: command
-    short-summary: Build an enclave image using packaged defaults or your own application.
+    short-summary: Build an enclave image from a supplied application.
     long-summary: >
         Run in a Linux environment (including WSL) with GNU cpio and gzip. Root and Azure login are not required.
+        Supply a prebuilt static x86-64 ELF binary with --application; no application is packaged with the extension.
         Saves an IGVM image and returns expected SNP launch measurements; does not launch an enclave.
         Existing output files are never overwritten.
         Failed or interrupted builds retain temporary files and logs automatically and report their location.
@@ -41,11 +42,11 @@ helps['enclave create'] = """
         Use --verbose for progress. --debug also enables guest debugging; do not use it for production images.
         Currently, SNP is the implicit and only enabled isolation type.
     examples:
-      - name: Create an image with the packaged application and startup script.
-        text: az enclave create --output-file ./enclave.igvm
+      - name: Create an image with a supplied application and the packaged startup script.
+        text: az enclave create --application ./my-app --output-file ./enclave.igvm
       - name: Use a different directory for temporary build files.
         text: >
-            az enclave create --output-file ./enclave.igvm --workspace /mnt/build
+            az enclave create --application ./my-app --output-file ./enclave.igvm --workspace /mnt/build
       - name: Package your own enclave application with a matching startup script.
         text: >
             az enclave create --application ./my-app --init-script ./my-init

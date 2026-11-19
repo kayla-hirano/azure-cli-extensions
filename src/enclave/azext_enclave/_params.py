@@ -14,8 +14,8 @@ def load_arguments(self, _):
         context.argument('dependency_bundle', required=False,
                          help='Path to a trusted compatible dependency bundle (tar/tar.gz or directory). '
                               'Defaults to the packaged bundle.')
-        context.argument('application', required=False,
-                         help='Path to a prebuilt static x86-64 ELF application. Defaults to the packaged application. '
+        context.argument('application', required=True,
+                         help='Path to a prebuilt static x86-64 ELF application. '
                               'Use --init-script to customize how it starts.')
         context.argument('init_script', required=False,
                          help='Path to a guest startup script with a shebang and LF line endings. '

@@ -130,11 +130,12 @@ Validate Azure Linux 3.0 and ``/dev/mshv``, install
 Create
 ~~~~~~
 
-Build an IGVM using the dependency archive, enclave application, and init
-script packaged with the extension. Run as your normal user on Linux L1
-with GNU cpio and gzip installed::
+Build an IGVM using the dependency archive and init
+script packaged with the extension. The enclave application is not included in dependency bundle.
+Run as your normal user on Linux L1with GNU cpio and gzip installed::
 
     "$ENCLAVE_VENV/bin/az" enclave create \
+        --application "$HOME/path/to/my-app" \
         --output-file "$HOME/images/enclave.igvm"
 
 Build intermediates use a unique private temporary directory, honoring
@@ -152,8 +153,6 @@ The packaged inputs are under ``azext_enclave/dependencies/``:
 * ``dependencies.tar.gz``: the trusted ``measured-pcie-v1`` bundle containing
   the kernel, base initrd, SNP boot shim, ``igvmfilegen``, guest manifest,
   and artifact hashes.
-* ``enclave_app``: the static x86-64 application installed as
-  ``/bin/enclave_app``.
 * ``initramfs/enclave-init``: the default guest startup script, which starts
   the application on guest vsock port 4050.
 
@@ -178,11 +177,11 @@ artifacts at the root or inside one top-level directory.
 
 Use ``--init-script`` to override guest startup. The supplied script must
 have a shebang and LF line endings and start the application appropriately.
-Launch expects a compatible application response on guest vsock port 4050.
+The default script runs ``/bin/enclave_app serve-vsock 4050``; supply
+``--init-script`` if your application requires a different invocation.
 
-Use ``--application`` to supply your own static x86-64 ELF binary instead
-of the packaged application. It is installed as ``/bin/enclave_app`` in the
-guest.
+The required ``--application`` supplies a prebuilt static x86-64 ELF binary.
+It is installed as ``/bin/enclave_app`` in the guest.
 
 Optional ``--signing-key`` requires OpenSSL and an unencrypted PEM ECDSA
 P-384 key. Signing failure never publishes an unsigned fallback. Adding a
@@ -375,6 +374,7 @@ Create an image as your normal user, or skip this step if you copied a
 prepared image::
 
     az enclave create \
+        --application "$HOME/path/to/my-app" \
         --workspace "$HOME/enclave-build" \
         --output-file "$HOME/enclave-artifacts/enclave.igvm"
 
