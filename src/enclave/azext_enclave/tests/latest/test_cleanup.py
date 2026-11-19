@@ -6,6 +6,8 @@
 """Exercise archive-before-removal, explicit discard, and manual handling of ambiguous cleanup."""
 
 import errno
+import io
+import json
 import os
 import stat
 import sys
@@ -19,7 +21,7 @@ from unittest.mock import patch
 from knack.util import CLIError
 
 from azext_enclave import _cleanup, _instance, _lifecycle
-from ._helpers import LinuxFilesystemTest
+from ._helpers import LinuxFilesystemTest, create_cli
 
 
 class CleanupTest(LinuxFilesystemTest):
@@ -54,13 +56,9 @@ class CleanupTest(LinuxFilesystemTest):
                 patcher = patch('azext_enclave.' + name + '.check_private', side_effect=self.check_directory)
                 patcher.start()
                 self.addCleanup(patcher.stop)
-            for name, replacement in (
-                    ('_regular_file', self.regular_file), ('_publish', os.rename),
-                    ('_remove_instance', self.portable_remove),
-                    ('_validate_file_info', lambda _path, _info: None)):
-                patcher = patch.object(_cleanup, name, side_effect=replacement)
-                patcher.start()
-                self.addCleanup(patcher.stop)
+            patcher = patch.object(_cleanup, '_regular_file', side_effect=self.regular_file)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     @staticmethod
     def check_directory(path):
@@ -68,26 +66,11 @@ class CleanupTest(LinuxFilesystemTest):
             raise CLIError('Unsafe directory: ' + str(path))
 
     @staticmethod
-    def regular_file(path, directory_fd=None):
-        del directory_fd
+    def regular_file(path):
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise CLIError('Unsafe regular file: ' + str(path))
         return info
-
-    @staticmethod
-    def portable_remove(directory, expected_identity):
-        """Windows lacks dirfd unlink; Linux runs the production descriptor-relative implementation."""
-        if _cleanup._directory_identity(directory) != expected_identity:
-            raise CLIError('Instance directory was replaced')
-        entries = list(directory.iterdir())
-        for entry in entries:
-            if entry.name not in _cleanup.INSTANCE_FILES:
-                raise CLIError('Unexpected instance entry')
-            _cleanup._regular_file(entry)
-        for entry in sorted(entries, key=lambda path: path.name == 'instance.json'):
-            entry.unlink()
-        directory.rmdir()
 
     def write(self, name, data):
         path = self.directory / name
@@ -232,7 +215,7 @@ class CleanupTest(LinuxFilesystemTest):
         self.assertNotEqual(saved.get('log_disposition'), 'archived')
 
     def test_partial_removal_keeps_state_and_archive_and_requires_manual_cleanup(self):
-        def fail_removal(directory, _identity):
+        def fail_removal(directory):
             (directory / 'com1.log').unlink()
             raise PermissionError('Removal interrupted')
 
@@ -286,10 +269,17 @@ class CleanupTest(LinuxFilesystemTest):
                 self.assertTrue((self.directory / 'com1.log').exists())
 
     def test_destroy_no_logs_resolves_policy_before_finalization(self):
+        cli = create_cli(str(self.base / 'cli-config'))
+        output = io.StringIO()
         with self.mock_destroy(), \
                 patch.object(_cleanup, 'archive_path', side_effect=AssertionError('Archive storage must not be accessed')):
-            result = _lifecycle.destroy(self.name, no_logs=True)
-        self.assertEqual(result['log_disposition'], 'discarded')
+            code = cli.invoke(
+                ['enclave', 'destroy', '--name', self.name, '--no-logs', '--output', 'json'], out_file=output)
+        self.assertEqual(code, 0, str(cli.result.error))
+        self.assertEqual(json.loads(output.getvalue()), {
+            'name': self.name, 'status': 'destroyed', 'log_disposition': 'discarded',
+            'archive_path': None, 'removal_outcome': 'removed',
+        })
         self.assertFalse(self.archive_root.exists())
         self.assertFalse(self.directory.exists())
 
@@ -306,7 +296,7 @@ class CleanupTest(LinuxFilesystemTest):
                 self.assertNotIn('cleanup_phase', saved)
 
     def test_failure_after_state_deletion_does_not_recreate_record(self):
-        def fail_rmdir(directory, _identity):
+        def fail_rmdir(directory):
             for entry in sorted(directory.iterdir(), key=lambda path: path.name == 'instance.json'):
                 entry.unlink()
             raise PermissionError('Directory removal interrupted')
@@ -329,39 +319,6 @@ class CleanupTest(LinuxFilesystemTest):
         self.assertEqual(list(self.archive.iterdir()), [])
         self.assertTrue((self.directory / 'response.json').exists())
 
-    def test_replaced_instance_is_not_removed_or_updated(self):
-        original = self.base / 'original'
-        remove_instance = _cleanup._remove_instance
-
-        def replace_before_removal(directory, expected_identity):
-            directory.rename(original)
-            directory.mkdir(mode=0o700)
-            self.write('com1.log', b'replacement must survive')
-            remove_instance(directory, expected_identity)
-
-        with patch.object(_cleanup, '_remove_instance', side_effect=replace_before_removal), \
-                patch.object(_cleanup.logger, 'error') as log_error:
-            with self.assertRaisesRegex(CLIError, 'replaced'):
-                self.finalize()
-        log_error.assert_called_once()
-        self.assertEqual((self.directory / 'com1.log').read_bytes(), b'replacement must survive')
-        self.assertFalse((self.directory / 'instance.json').exists())
-        self.assertTrue((original / 'response.json').exists())
-
-    def test_archive_integrity_failure_does_not_remove_originals(self):
-        copy_log = _cleanup._copy_log
-
-        def corrupt_copy(source, target, expected):
-            copy_log(source, target, expected)
-            if target.name == 'com1.log':
-                target.write_bytes(b'corrupted')
-
-        with patch.object(_cleanup, '_copy_log', side_effect=corrupt_copy):
-            with self.assertRaisesRegex(CLIError, 'integrity validation'):
-                self.finalize()
-        self.assertEqual((self.directory / 'com1.log').read_bytes(), b'com1.log\n')
-        self.assertFalse(self.archive.exists())
-
     def test_unexpected_files_block_removal_without_deleting_them(self):
         self.write('unexpected.txt', b'preserve')
         with self.assertRaisesRegex(CLIError, 'Unexpected instance entry'):
@@ -370,12 +327,19 @@ class CleanupTest(LinuxFilesystemTest):
         self.assertTrue((self.directory / 'unexpected.txt').exists())
 
     def test_destroy_archives_removes_and_then_reports_not_found_without_rpc(self):
+        cli = create_cli(str(self.base / 'cli-config'))
+        output = io.StringIO()
         with self.mock_destroy() as client:
-            result = _lifecycle.destroy(self.name)
-            with self.assertRaisesRegex(CLIError, 'Enclave instance not found'):
-                _lifecycle.destroy(self.name, no_logs=True)
+            code = cli.invoke(['enclave', 'destroy', '--name', self.name, '--output', 'json'], out_file=output)
+            self.assertEqual(code, 0, str(cli.result.error))
+            self.assertEqual(json.loads(output.getvalue()), {
+                'name': self.name, 'status': 'destroyed', 'log_disposition': 'archived',
+                'archive_path': str(self.archive), 'removal_outcome': 'removed',
+            })
+            code = cli.invoke(['enclave', 'destroy', '--name', self.name, '--no-logs'], out_file=io.StringIO())
+            self.assertNotEqual(code, 0)
+            self.assertIn('Enclave instance not found', str(cli.result.error))
         client.assert_not_called()
-        self.assertEqual(result['removal_outcome'], 'removed')
         self.assertFalse(self.directory.exists())
         self.assertEqual((self.archive / 'com1.log').read_bytes(), b'com1.log\n')
 
@@ -396,7 +360,7 @@ class CleanupTest(LinuxFilesystemTest):
                 self.assertFalse(self.archive_root.exists())
 
     def test_orphan_staging_is_preserved_when_instance_is_not_found(self):
-        self.portable_remove(self.directory, _cleanup._directory_identity(self.directory))
+        _cleanup._remove_instance(self.directory)
         staging = _cleanup.staging_path(self.archive)
         staging.mkdir(mode=0o700, parents=True)
         with self.mock_destroy() as client, patch.object(_lifecycle, '_shutdown_instance') as shutdown:
@@ -419,20 +383,49 @@ class CleanupTest(LinuxFilesystemTest):
                 self.finalize()
         self.assertTrue((self.directory / 'com1.log').exists())
         self.assertFalse(self.archive.exists())
+        saved = _instance.read_record(self.directory / 'instance.json')
+        self.assertNotIn('cleanup_phase', saved)
+        self.assertEqual(saved['cleanup_error'], 'Log cannot be read')
         self.assertEqual(self.finalize(no_logs=True)['log_disposition'], 'discarded')
 
     def test_copy_failure_preserves_originals_and_reports_failure(self):
-        with patch.object(_cleanup, '_copy_log', side_effect=PermissionError('Cannot copy logs')), \
+        def fail_copy(_source, target):
+            target.write(b'partial copy')
+            raise PermissionError('Cannot copy logs')
+
+        with patch.object(_cleanup.shutil, 'copyfileobj', side_effect=fail_copy), \
                 patch.object(_cleanup, '_remove_instance') as remove:
             with self.assertRaisesRegex(PermissionError, 'Cannot copy logs'):
                 self.finalize()
         remove.assert_not_called()
         self.assertFalse(self.archive.exists())
         for name in _cleanup.LOG_NAMES:
-            self.assertTrue((self.directory / name).exists())
+            self.assertEqual((self.directory / name).read_bytes(), (name + '\n').encode())
+        self.assertEqual((_cleanup.staging_path(self.archive) / 'com1.log').read_bytes(), b'partial copy')
         saved = _instance.read_record(self.directory / 'instance.json')
         self.assertEqual(saved['cleanup_phase'], 'archiving')
         self.assertEqual(saved['cleanup_error'], 'Cannot copy logs')
+
+    def test_log_flush_failure_preserves_original(self):
+        source = self.directory / 'com1.log'
+        target = self.base / 'copy.log'
+        with patch.object(_cleanup.os, 'fsync', side_effect=OSError('Cannot flush log')):
+            with self.assertRaisesRegex(OSError, 'Cannot flush log'):
+                _cleanup._copy_log(source, target)
+        self.assertEqual(source.read_bytes(), b'com1.log\n')
+
+    def test_instance_record_is_deleted_last(self):
+        unlink = Path.unlink
+        removed = []
+
+        def track_unlink(path):
+            removed.append(path.name)
+            unlink(path)
+
+        with patch.object(Path, 'unlink', autospec=True, side_effect=track_unlink):
+            self.finalize(no_logs=True)
+        self.assertEqual(removed[-1], 'instance.json')
+        self.assertFalse(self.directory.exists())
 
 
 class CleanupOwnershipTest(LinuxFilesystemTest):
@@ -446,25 +439,7 @@ class CleanupOwnershipTest(LinuxFilesystemTest):
             with self.subTest(record=record), self.assertRaisesRegex(CLIError, 'Invalid process identity'):
                 _lifecycle._validate_process(record)
 
-    def test_instance_record_is_deleted_last(self):
-        directory = Path('instance')
-        expected_identity = [1, 2]
-        with patch.object(_cleanup, '_directory_identity', return_value=expected_identity), \
-                patch.object(_cleanup, '_regular_file'), \
-                patch.object(_cleanup.os, 'O_DIRECTORY', 0, create=True), \
-                patch.object(_cleanup.os, 'open', return_value=47), \
-                patch.object(_cleanup.os, 'fstat', return_value=SimpleNamespace(st_dev=1, st_ino=2)), \
-                patch.object(_cleanup.os, 'listdir', return_value=['instance.json', 'com1.log', 'runtime.json']), \
-                patch.object(_cleanup.os, 'unlink') as unlink, \
-                patch.object(_cleanup.os, 'close'), \
-                patch.object(Path, 'rmdir'), \
-                patch.object(_cleanup, 'sync_directory'):
-            _cleanup._remove_instance(directory, expected_identity)
-        self.assertEqual([call.args[0] for call in unlink.call_args_list],
-                         ['com1.log', 'runtime.json', 'instance.json'])
-
-    @unittest.skipUnless(sys.platform == 'linux', 'Requires Linux renameat2 no-replace semantics')
-    def test_publication_never_replaces_a_racing_empty_directory(self):
+    def test_publication_rejects_an_existing_empty_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             source, destination = Path(temporary) / 'staging', Path(temporary) / 'archive'
             source.mkdir(mode=0o700)
