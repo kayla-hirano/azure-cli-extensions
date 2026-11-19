@@ -30,7 +30,7 @@ def setup_enclave(yes: bool = False) -> dict:
 def create_enclave(cmd: AzCliCommand, output_file: str, application: str, workspace: Optional[str] = None,
                    dependency_bundle: Optional[str] = None, init_script: Optional[str] = None,
                    signing_key: Optional[str] = None,
-                   keep_intermediates: bool = False) -> dict:
+                   keep_intermediates: bool = False, app_cmd_line: Optional[str] = None) -> dict:
     """Compose an IGVM from trusted dependencies and a caller-supplied application."""
     from ._image_builder import IgvmBuildError, SnpBuildOptions, build_igvm, validate_build_configuration
     from ._isolation import IsolationType, load_isolation
@@ -62,8 +62,8 @@ def create_enclave(cmd: AzCliCommand, output_file: str, application: str, worksp
         result = build_igvm(
             dependency_bundle=bundle,
             application=Path(application).expanduser(),
-            init_script=(Path(init_script).expanduser() if init_script is not None
-                         else DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'),
+            init_script=Path(init_script).expanduser() if init_script is not None else None,
+            app_cmd_line=app_cmd_line,
             workspace=Path(workspace).expanduser() if workspace is not None else None,
             output=Path(output_file).expanduser(),
             keep_intermediates=keep_intermediates,

@@ -54,7 +54,7 @@ class CreateCommandTest(unittest.TestCase):
         validate.assert_called_once_with(load_isolation(), isolation_options=None, enable_guest_debug=False)
         build.assert_called_once_with(
             dependency_bundle=Path('bundle'), application=Path('my-app'),
-            init_script=custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init', workspace=Path('work'),
+            init_script=None, app_cmd_line=None, workspace=Path('work'),
             output=Path('image.igvm'), keep_intermediates=False, enable_guest_debug=False,
             isolation_options=builder.SnpBuildOptions(), logger=custom.logger, configuration=load_isolation())
 
@@ -137,6 +137,7 @@ class CreateCommandTest(unittest.TestCase):
         self.assertIsNone(arguments['workspace'].options['default'])
         self.assertIsNone(arguments['signing_key'].options['default'])
         self.assertIsNone(arguments['init_script'].options['default'])
+        self.assertIsNone(arguments['app_cmd_line'].options['default'])
         self.assertIsNone(arguments['dependency_bundle'].options['default'])
         self.assertEqual(arguments['application'].options_list, ['--application'])
         default_init = custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'
@@ -149,7 +150,7 @@ class CreateCommandTest(unittest.TestCase):
                           return_value=builder.IgvmBuildResult(Path('image.igvm'), self.measurements)) as build:
             custom.create_enclave(
                 self.cmd, 'image.igvm', application='my-app', workspace='work', dependency_bundle='bundle')
-        self.assertEqual(build.call_args.kwargs['init_script'], default_init)
+        self.assertIsNone(build.call_args.kwargs['init_script'])
 
     def test_packaged_bundle_is_selected_when_override_is_omitted(self) -> None:
         """Select the packaged dependency archive when the caller provides no bundle override."""
@@ -364,9 +365,10 @@ class BuildInputs:
 
     def build(self, **kwargs) -> builder.IgvmBuildResult:
         workspace = kwargs.pop('workspace', self.workspace)
+        init_script = kwargs.pop('init_script', self.init)
         return builder.build_igvm(
             dependency_bundle=self.bundle, application=self.application,
-            init_script=self.init, workspace=workspace, output=self.output, **kwargs)
+            init_script=init_script, workspace=workspace, output=self.output, **kwargs)
 
 
 class ImageBuilderTest(unittest.TestCase):

@@ -31,6 +31,8 @@ from ._isolation import IsolationConfiguration, IsolationType, load_isolation
 
 __all__ = ["IgvmBuildError", "IgvmBuildResult", "SnpBuildOptions", "build_igvm", "validate_build_configuration"]
 
+DEFAULT_INIT_SCRIPT = Path(__file__).parent / "dependencies" / "initramfs" / "enclave-init"
+
 
 @dataclass(frozen=True)
 class SnpBuildOptions:
@@ -478,6 +480,17 @@ def _validate_init_and_tools(init: Path) -> int:
     return epoch
 
 
+def _init_contents(init: Path, app_cmd_line: str) -> bytes:
+    if (not isinstance(app_cmd_line, str) or not app_cmd_line.strip()
+            or any(character in app_cmd_line for character in "\0\r\n")):
+        raise ValueError("--app-cmd-line must be a nonempty string without NUL, CR or newline characters")
+    contents = init.read_bytes()
+    prefix, separator, command = contents.rpartition(b"\nexec ")
+    if not separator or not command.endswith(b"\n") or b"\n" in command[:-1]:
+        raise ValueError("Cannot replace the final exec command in the default init script")
+    return prefix + separator + app_cmd_line.encode("utf-8") + b"\n"
+
+
 def _validate_generated_image(image: Path, stage: str, *, signed: bool = False) -> None:
     if image.is_symlink() or not image.is_file() or image.stat().st_size == 0:
         raise IgvmBuildError(
@@ -508,7 +521,8 @@ def build_igvm(
     *,
     dependency_bundle: Path,
     application: Path,
-    init_script: Path,
+    init_script: Optional[Path] = None,
+    app_cmd_line: Optional[str] = None,
     output: Path,
     workspace: Optional[Path] = None,
     keep_intermediates: bool = False,
@@ -520,7 +534,7 @@ def build_igvm(
     """Build and publish one IGVM without compiling dependencies or changing inputs.
 
     Requires Linux, cpio/gzip, an ELF64 x86-64 application without PT_INTERP,
-    and an LF shebang init script that ultimately executes /bin/enclave_app.
+    and an LF shebang init script that can be overwritten using --init_script or --app_cmd_line.
     The trusted dependency bundle may be a directory or tar/tar.gz archive;
     artifact paths and hashes are checked before bundled tools run.
 
@@ -544,6 +558,8 @@ def build_igvm(
     staged_output = None
     failure = None
     try:
+        if app_cmd_line is not None and init_script is not None:
+            raise ValueError("--app-cmd-line cannot be combined with --init-script")
         configuration = configuration if configuration is not None else load_isolation()
         isolation_options = validate_build_configuration(
             configuration, isolation_options=isolation_options, enable_guest_debug=enable_guest_debug)
@@ -553,7 +569,8 @@ def build_igvm(
             raise ValueError("IGVM packaging requires Linux")
         bundle = Path(dependency_bundle).resolve(strict=True)
         app = _input_file(Path(application))
-        init = _input_file(Path(init_script))
+        init = _input_file(Path(init_script) if init_script is not None else DEFAULT_INIT_SCRIPT)
+        init_contents = _init_contents(init, app_cmd_line) if app_cmd_line is not None else None
         key = None
         if configuration.isolation_type == IsolationType.SNP and isolation_options.signing_key is not None:
             key = _input_file(Path(isolation_options.signing_key))
@@ -576,6 +593,9 @@ def build_igvm(
             stage = "validate-dependencies"
             dependencies = _dependencies(extracted, configuration)
         stage = "compose-initrd"
+        if init_contents is not None:
+            init = work / "enclave-init"
+            init.write_bytes(init_contents)
         initrd = _compose_initrd(
             dependencies["base_initrd"], app, init, work, epoch, logger)
 

@@ -175,10 +175,14 @@ or existing bundle directory instead of the packaged archive.
 An archive must contain ``dependency-manifest.v1.json`` and its referenced
 artifacts at the root or inside one top-level directory.
 
-Use ``--init-script`` to override guest startup. The supplied script must
-have a shebang and LF line endings and start the application appropriately.
-The default script runs ``/bin/enclave_app serve-vsock 4050``; supply
-``--init-script`` if your application requires a different invocation.
+Use ``--app-cmd-line`` to replace the command after the default startup script's
+final ``exec``, preserving mounts and other initialization.
+The default command is ``/bin/enclave_app serve-vsock 4050``.
+
+Use ``--init-script`` for a complete guest startup replacement. The supplied
+script must have a shebang and LF line endings and start the application
+appropriately. It cannot be combined with ``--app-cmd-line``, even when the
+command matches the default. Neither option changes the original init script.
 
 The required ``--application`` supplies a prebuilt static x86-64 ELF binary.
 It is installed as ``/bin/enclave_app`` in the guest.

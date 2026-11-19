@@ -34,7 +34,7 @@ class EnclaveCommandTest(unittest.TestCase):
         """Keep setup approval and lifecycle options scoped to the appropriate commands."""
         expected = {
             'enclave setup': {'yes'},
-            'enclave create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'workspace',
+            'enclave create': {'cmd', 'dependency_bundle', 'application', 'init_script', 'app_cmd_line', 'workspace',
                                'output_file', 'signing_key', 'keep_intermediates'},
             'enclave launch': {'name', 'igvm', 'openvmm', 'timeout', 'allow_untested_runtime'},
             'enclave destroy': {'name', 'timeout'},

@@ -16,7 +16,11 @@ def load_arguments(self, _):
                               'Defaults to the packaged bundle.')
         context.argument('application', required=True,
                          help='Path to a prebuilt static x86-64 ELF application. '
-                              'Use --init-script to customize how it starts.')
+                              'Use --app-cmd-line or --init-script to customize how it starts.')
+        context.argument('app_cmd_line', required=False,
+                         help='Guest shell command following exec in the default startup script. '
+                              'Defaults to /bin/enclave_app serve-vsock 4050. '
+                              'Cannot be combined with --init-script; shell content is not validated.')
         context.argument('init_script', required=False,
                          help='Path to a guest startup script with a shebang and LF line endings. '
                               'Replaces the default script; the application is installed at /bin/enclave_app.')

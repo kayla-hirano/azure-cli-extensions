@@ -51,6 +51,11 @@ helps['enclave create'] = """
         text: >
             az enclave create --application ./my-app --init-script ./my-init
             --output-file ./custom.igvm
+      - name: Customize the application command while preserving default guest initialization.
+        text: >
+            az enclave create --application ./my-app
+            --app-cmd-line '/bin/enclave_app serve-vsock 4050 2>&1'
+            --output-file ./custom.igvm
 """
 
 helps['enclave launch'] = """
