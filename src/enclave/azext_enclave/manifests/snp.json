@@ -17,6 +17,9 @@
     "processor_count": 1,
     "memory_mib": 160
   },
+  "image": {
+    "command_line": "console=ttyS0 earlyprintk=serial earlycon panic=-1"
+  },
   "runtime": {
     "backend": "mshv",
     "disable_vmbus": true,

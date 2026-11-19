@@ -26,7 +26,7 @@ import sys
 import tarfile
 import tempfile
 from typing import BinaryIO, Dict, List, NamedTuple, Optional, Sequence, Tuple
-from ._isolation import IsolationConfiguration, load_isolation, validate_configuration
+from ._isolation import IsolationConfiguration, IsolationType, load_isolation, validate_configuration
 
 
 __all__ = ["IgvmBuildError", "IgvmBuildResult", "SnpBuildOptions", "build_igvm", "validate_build_configuration"]
@@ -144,7 +144,7 @@ def _recipe(path: Path, configuration: IsolationConfiguration) -> dict:
     if (not isinstance(guests, list) or len(guests) != 1
             or not isinstance(guests[0], dict)):
         raise ValueError("Expected one IGVM guest configuration")
-    if configuration.isolation_type == "snp":
+    if configuration.isolation_type == IsolationType.SNP:
         _snp_recipe(guests[0])
     else:
         raise ValueError("IGVM recipe handling is not implemented for isolation type: " + configuration.isolation_type)
@@ -154,8 +154,8 @@ def _recipe(path: Path, configuration: IsolationConfiguration) -> dict:
 def _snp_recipe(guest: dict) -> None:
     """Require SNP Linux-direct resource fields."""
     isolation = guest.get("isolation_type")
-    if (not isinstance(isolation, dict) or set(isolation) != {"snp"}
-            or not isinstance(isolation["snp"], dict)):
+    if (not isinstance(isolation, dict) or set(isolation) != {IsolationType.SNP.value}
+            or not isinstance(isolation[IsolationType.SNP.value], dict)):
         raise ValueError("IGVM manifest is missing SNP isolation settings")
     image = guest.get("image")
     if not isinstance(image, dict) or set(image) != {"snp_linux_direct"}:
@@ -234,7 +234,7 @@ def validate_build_configuration(
     """Validate support and resolve type-specific defaults before reading inputs."""
     if isolation_options is not None and not isinstance(isolation_options, SnpBuildOptions):
         raise ValueError("Unsupported isolation build options: " + type(isolation_options).__name__)
-    if configuration.isolation_type == "snp":
+    if configuration.isolation_type == IsolationType.SNP:
         validate_configuration(configuration)
         return isolation_options if isolation_options is not None else SnpBuildOptions()
     if isolation_options is not None and isolation_options.signing_key is not None:
@@ -253,9 +253,9 @@ def _generation_inputs(
 ) -> Tuple[dict, dict]:
     """Return a private recipe with the debug override and isolation-specific generator resource paths."""
     config = _recipe(dependencies["igvm_manifest"], configuration)
-    if configuration.isolation_type == "snp":
+    if configuration.isolation_type == IsolationType.SNP:
         guest = config["guest_configs"][0]
-        guest["isolation_type"]["snp"]["enable_debug"] = enable_guest_debug
+        guest["isolation_type"][IsolationType.SNP.value]["enable_debug"] = enable_guest_debug
         resources = {
             "linux_kernel": str(dependencies["kernel"]),
             "linux_initrd": str(initrd),
@@ -267,10 +267,10 @@ def _generation_inputs(
     return config, {"resources": resources}
 
 
-def _measurements(image: Path, isolation_type: str) -> Dict[str, str]:
+def _measurements(image: Path, isolation_type: IsolationType) -> Dict[str, str]:
     """Read generator measurements through the selected isolation implementation."""
-    if isolation_type == "snp":
-        return {"snp": _snp_measurement(image)}
+    if isolation_type == IsolationType.SNP:
+        return {IsolationType.SNP.value: _snp_measurement(image)}
     raise ValueError("Image measurements are not implemented for isolation type: " + isolation_type)
 
 
@@ -556,7 +556,7 @@ def build_igvm(
         app = _input_file(Path(application))
         init = _input_file(Path(init_script))
         key = None
-        if configuration.isolation_type == "snp" and isolation_options.signing_key is not None:
+        if configuration.isolation_type == IsolationType.SNP and isolation_options.signing_key is not None:
             key = _input_file(Path(isolation_options.signing_key))
             if shutil.which("openssl") is None:
                 raise ValueError("Required command not found: openssl")
@@ -598,7 +598,7 @@ def build_igvm(
         stage = "read-measurements"
         measurements = _measurements(generated, configuration.isolation_type)
 
-        if configuration.isolation_type == "snp" and key is not None:
+        if configuration.isolation_type == IsolationType.SNP and key is not None:
             stage = "sign-id-block"
             generated = _sign_snp_id_block(
                 dependencies["igvmfilegen"], generated, key, work, logger)

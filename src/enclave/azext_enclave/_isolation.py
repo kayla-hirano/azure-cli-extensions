@@ -3,16 +3,31 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-"""Load packaged isolation configuration; Python owns implementation support and lifecycle policy."""
+"""Load packaged isolation configuration using type-specific manifest parsers.
+
+Only the SNP manifest format is currently implemented. Future isolation types
+can define their own manifest structure and parser.
+"""
 
 from dataclasses import dataclass
+from enum import Enum
 from importlib import resources
 import json
 from pathlib import PurePosixPath
-from typing import Tuple
+from typing import Tuple, Union
 
 
-_ENABLED_MANIFESTS = {'snp': 'manifests/snp.json'}
+class IsolationType(str, Enum):
+    """Isolation types recognized by the extension, using their manifest values."""
+
+    SNP = 'snp'
+
+    def __str__(self) -> str:
+        """Preserve the manifest value in diagnostics and formatted output."""
+        return self.value
+
+
+_ENABLED_MANIFESTS = {IsolationType.SNP: 'manifests/snp.json'}
 _SNP_ARTIFACTS = {'kernel', 'base_initrd', 'snp_bootshim', 'igvmfilegen', 'igvm_manifest'}
 
 
@@ -40,6 +55,13 @@ class ResourceDefaults:
 
     processor_count: int
     memory_mib: int
+
+
+@dataclass(frozen=True)
+class ImageConfiguration:
+    """Image metadata; create continues to use the bundle's IGVM recipe."""
+
+    command_line: str
 
 
 @dataclass(frozen=True)
@@ -76,10 +98,11 @@ class IsolationConfiguration:  # pylint: disable=too-many-instance-attributes
     """
 
     schema_version: int
-    isolation_type: str
+    isolation_type: IsolationType
     supported_configuration: SupportedConfiguration
     dependency_bundle: DependencyBundle
     defaults: ResourceDefaults
+    image: ImageConfiguration
     runtime: RuntimeConfiguration
     serial_port: int
     pcie: PcieConfiguration
@@ -89,7 +112,7 @@ class IsolationConfiguration:  # pylint: disable=too-many-instance-attributes
 def validate_configuration(configuration: IsolationConfiguration) -> None:
     """Validate backend requirements and the type-specific contract independently of operation support."""
     _validate_backend(configuration.runtime.backend, configuration.character_devices)
-    if configuration.isolation_type == 'snp':
+    if configuration.isolation_type == IsolationType.SNP:
         _validate_snp_configuration(configuration)
     else:
         raise ValueError('Unsupported isolation configuration type: {}'.format(configuration.isolation_type))
@@ -105,10 +128,9 @@ def _validate_backend(backend: str, character_devices: Tuple[str, ...]) -> None:
 
 
 def _validate_snp_configuration(configuration: IsolationConfiguration) -> None:
-    """Require the guest, backend, and artifact contracts implemented by the SNP path."""
-    if (configuration.supported_configuration != SupportedConfiguration(
-            'x86_64', 'linux_direct', 'measured-pcie-v1')
-            or configuration.runtime.backend != 'mshv'):
+    """Require the guest and artifact contracts implemented by the SNP path."""
+    if configuration.supported_configuration != SupportedConfiguration(
+            'x86_64', 'linux_direct', 'measured-pcie-v1'):
         raise ValueError('Unsupported isolation configuration; only SNP Linux-direct on mshv is implemented')
     if (set(configuration.dependency_bundle.required_artifacts) != _SNP_ARTIFACTS
             or configuration.dependency_bundle.profile != configuration.supported_configuration.device_layout):
@@ -139,30 +161,9 @@ def _strings(value: object, location: str) -> Tuple[str, ...]:
     return tuple(value)
 
 
-def parse_manifest(document: object, isolation_type: str) -> IsolationConfiguration:
-    """Validate schema 1 and reject unsupported or contradictory configuration."""
-    if isolation_type not in _ENABLED_MANIFESTS:
-        raise ValueError('Isolation type is not enabled: {}'.format(isolation_type))
-    root = _object(document, 'schema_version isolation_type supported_configuration dependency_bundle '
-                   'defaults runtime devices host_requirements', 'root')
-    _integer(root['schema_version'], 1, 1, 'schema_version')
-    if root['isolation_type'] != isolation_type:
-        raise ValueError('Isolation manifest type does not match {}'.format(isolation_type))
-    supported = SupportedConfiguration(**_object(
-        root['supported_configuration'], 'architecture boot_mode device_layout', 'supported_configuration'))
-    bundle = _object(root['dependency_bundle'], 'schema_version profile required_artifacts', 'dependency_bundle')
-    _integer(bundle['schema_version'], 1, 1, 'dependency_bundle.schema_version')
-    required = _strings(bundle['required_artifacts'], 'dependency_bundle.required_artifacts')
-    defaults = _object(root['defaults'], 'processor_count memory_mib', 'defaults')
-    cpu = _integer(defaults['processor_count'], 1, 0xffffffff, 'defaults.processor_count')
-    memory = _integer(defaults['memory_mib'], 1, 0xffffffffffffffff // (1024 * 1024), 'defaults.memory_mib')
-    runtime = _object(root['runtime'], 'backend disable_vmbus disable_hv', 'runtime')
-    if any(not isinstance(runtime[key], bool) for key in ('disable_vmbus', 'disable_hv')):
-        raise ValueError('Invalid isolation manifest runtime switches: expected booleans')
-    devices = _object(root['devices'], 'serial pcie', 'devices')
-    serial = _object(devices['serial'], 'port', 'devices.serial')
-    serial_port = _integer(serial['port'], 0, 3, 'devices.serial.port')
-    pcie = _object(devices['pcie'], 'segment start_bus end_bus ecam_base low_mmio_base low_mmio_size '
+def _parse_snp_pcie(document: object) -> PcieConfiguration:
+    """Parse the SNP measured PCIe layout, rejecting invalid or overlapping address ranges."""
+    pcie = _object(document, 'segment start_bus end_bus ecam_base low_mmio_base low_mmio_size '
                    'high_mmio_base high_mmio_size', 'devices.pcie')
     for key, value in pcie.items():
         maximum = 0xffff if key == 'segment' else 0xff if key in ('start_bus', 'end_bus') else 0xffffffffffffffff
@@ -181,20 +182,57 @@ def parse_manifest(document: object, isolation_type: str) -> IsolationConfigurat
     for index, (base, size, _) in enumerate(ranges):
         if any(base < other + extent and other < base + size for other, extent, _ in ranges[index + 1:]):
             raise ValueError('Contradictory isolation manifest PCIe address ranges overlap')
+    return PcieConfiguration(**pcie)
+
+
+def _parse_snp_manifest(document: object) -> IsolationConfiguration:
+    """Parse SNP schema 1; its JSON structure is not a contract for other isolation types."""
+    root = _object(document, 'schema_version isolation_type supported_configuration dependency_bundle '
+                   'defaults image runtime devices host_requirements', 'root')
+    _integer(root['schema_version'], 1, 1, 'schema_version')
+    if root['isolation_type'] != IsolationType.SNP:
+        raise ValueError('Isolation manifest type does not match snp')
+    supported = SupportedConfiguration(**_object(
+        root['supported_configuration'], 'architecture boot_mode device_layout', 'supported_configuration'))
+    bundle = _object(root['dependency_bundle'], 'schema_version profile required_artifacts', 'dependency_bundle')
+    _integer(bundle['schema_version'], 1, 1, 'dependency_bundle.schema_version')
+    required = _strings(bundle['required_artifacts'], 'dependency_bundle.required_artifacts')
+    defaults = _object(root['defaults'], 'processor_count memory_mib', 'defaults')
+    cpu = _integer(defaults['processor_count'], 1, 0xffffffff, 'defaults.processor_count')
+    memory = _integer(defaults['memory_mib'], 1, 0xffffffffffffffff // (1024 * 1024), 'defaults.memory_mib')
+    image = ImageConfiguration(**_object(root['image'], 'command_line', 'image'))
+    if not isinstance(image.command_line, str):
+        raise ValueError('Invalid isolation manifest image.command_line: expected a string')
+    runtime = _object(root['runtime'], 'backend disable_vmbus disable_hv', 'runtime')
+    if any(not isinstance(runtime[key], bool) for key in ('disable_vmbus', 'disable_hv')):
+        raise ValueError('Invalid isolation manifest runtime switches: expected booleans')
+    devices = _object(root['devices'], 'serial pcie', 'devices')
+    serial = _object(devices['serial'], 'port', 'devices.serial')
+    serial_port = _integer(serial['port'], 0, 3, 'devices.serial.port')
+    pcie = _parse_snp_pcie(devices['pcie'])
     host = _object(root['host_requirements'], 'character_devices', 'host_requirements')
     character_devices = _strings(host['character_devices'], 'host_requirements.character_devices')
     if any(not path.startswith('/dev/') or str(PurePosixPath(path)) != path
            or '..' in PurePosixPath(path).parts for path in character_devices):
         raise ValueError('Invalid isolation manifest host character device paths')
     configuration = IsolationConfiguration(
-        1, isolation_type, supported, DependencyBundle(1, bundle['profile'], required),
-        ResourceDefaults(cpu, memory), RuntimeConfiguration(**runtime), serial_port,
-        PcieConfiguration(**pcie), character_devices)
+        1, IsolationType(root['isolation_type']), supported, DependencyBundle(1, bundle['profile'], required),
+        ResourceDefaults(cpu, memory), image, RuntimeConfiguration(**runtime), serial_port,
+        pcie, character_devices)
     validate_configuration(configuration)
     return configuration
 
 
-def load_isolation(isolation_type: str = 'snp') -> IsolationConfiguration:
+def parse_manifest(document: object, isolation_type: Union[str, IsolationType]) -> IsolationConfiguration:
+    """Dispatch to the selected type's parser without assuming a shared manifest format."""
+    if isolation_type not in _ENABLED_MANIFESTS:
+        raise ValueError('Isolation type is not enabled: {}'.format(isolation_type))
+    if isolation_type == IsolationType.SNP:
+        return _parse_snp_manifest(document)
+    raise ValueError('Unsupported isolation configuration type: {}'.format(isolation_type))
+
+
+def load_isolation(isolation_type: Union[str, IsolationType] = IsolationType.SNP) -> IsolationConfiguration:
     """Read only explicitly enabled, installed package resources, without discovery or downloads."""
     if isolation_type not in _ENABLED_MANIFESTS:
         raise ValueError('Isolation type is not enabled: {}'.format(isolation_type))

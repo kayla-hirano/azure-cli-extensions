@@ -85,7 +85,8 @@ def read_line(stream: Union[BufferedReader, BufferedRWPair], connection: Optiona
 def _validate_snp_response(value: object) -> None:
     """Check SNP evidence type, length, and hexadecimal encoding without verifying attestation."""
     evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
-    report = evidence.get('report') if isinstance(evidence, dict) and evidence.get('tee') == 'snp' else None
+    report = (evidence.get('report')
+              if isinstance(evidence, dict) and evidence.get('tee') == IsolationType.SNP else None)
     if not isinstance(report, str) or len(report) != 2368:
         raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
     try:
@@ -94,14 +95,14 @@ def _validate_snp_response(value: object) -> None:
         raise CLIError('Guest SNP report is not valid hexadecimal.') from error
 
 
-def _guest_response_validator(isolation_type: str) -> Callable[[object], None]:
+def _guest_response_validator(isolation_type: IsolationType) -> Callable[[object], None]:
     """Select an implemented evidence-shape validator before opening the guest connection."""
-    if isolation_type == 'snp':
+    if isolation_type == IsolationType.SNP:
         return _validate_snp_response
     raise CLIError('Guest readiness is not implemented for isolation type: ' + isolation_type)
 
 
-def probe_guest(directory: Path, deadline: float, isolation_type: str = 'snp') -> None:
+def probe_guest(directory: Path, deadline: float, isolation_type: IsolationType = IsolationType.SNP) -> None:
     """Retry the shared guest exchange and retain evidence after type-specific shape checks."""
     validate_response = _guest_response_validator(isolation_type)
     last_error = 'Guest relay has not become available.'
@@ -126,6 +127,8 @@ def probe_guest(directory: Path, deadline: float, isolation_type: str = 'snp') -
                     response = read_line(stream, connection, deadline)
             value = json.loads(response)
             validate_response(value)
+            (directory / 'response.json').write_bytes(response)
+            return
         except OSError as error:
             last_error = str(error)
             logger.debug('Waiting for enclave application: %s', error)

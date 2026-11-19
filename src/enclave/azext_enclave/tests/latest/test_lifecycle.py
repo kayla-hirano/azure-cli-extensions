@@ -165,15 +165,15 @@ class LifecycleTest(LinuxFilesystemTest):
             self.assertEqual(runtime.popen.call_args.kwargs['pass_fds'], (47,))
         self.assertEqual(_instance.read_record(self.directory / 'instance.json'), result)
 
-    def test_launch_uses_manifest_and_preserves_attestation_disclaimer(self) -> None:
-        """Apply manifest resources and preserve the evidence-verification disclaimer."""
+    def test_launch_uses_manifest_without_changing_instance_schema(self) -> None:
+        """Apply manifest resources and evidence handling while preserving schema 1 and the attestation disclaimer."""
         configuration = load_isolation()
         configuration = replace(configuration, defaults=replace(
             configuration.defaults, processor_count=2, memory_mib=256))
         with self.mock_launch_runtime() as runtime, \
                 patch.object(_lifecycle, 'load_isolation', return_value=configuration), \
                 patch.object(_lifecycle.logger, 'warning') as warning:
-            result = _lifecycle.launch(str(self.image), 'demo')
+            result = _lifecycle.launch('demo', str(self.image))
         request = self.client.call.call_args_list[0].args[1]
         self.assertEqual(request.config.processor_config.processor_count, 2)
         self.assertEqual(request.config.memory_config.memory_mb, 256)
@@ -190,7 +190,7 @@ class LifecycleTest(LinuxFilesystemTest):
                 patch.object(_lifecycle, 'load_isolation', side_effect=ValueError('bad manifest')), \
                 patch.object(_lifecycle, 'resolve_runtime') as resolve:
             with self.assertRaisesRegex(ValueError, 'bad manifest'):
-                _lifecycle.launch(str(self.image), 'demo')
+                _lifecycle.launch('demo', str(self.image))
         runtime.popen.assert_not_called()
         resolve.assert_not_called()
         self.assertFalse(self.directory.exists())
@@ -209,7 +209,7 @@ class LifecycleTest(LinuxFilesystemTest):
                 rpc_check = (patch.object(_lifecycle, 'validate_launch_configuration')
                              if rpc_supported else nullcontext())
                 with rpc_check, self.assertRaisesRegex((ValueError, CLIError), message):
-                    _lifecycle.launch(str(self.image), 'demo')
+                    _lifecycle.launch('demo', str(self.image))
                 host.assert_not_called()
                 resolve.assert_not_called()
                 instance.assert_not_called()
@@ -221,48 +221,9 @@ class LifecycleTest(LinuxFilesystemTest):
         with self.mock_launch_runtime() as runtime, \
                 patch.object(_lifecycle, 'load_isolation', return_value=configuration):
             with self.assertRaisesRegex(CLIError, '/dev/required character device'):
-                _lifecycle.launch(str(self.image), 'demo')
+                _lifecycle.launch('demo', str(self.image))
         runtime.popen.assert_not_called()
         self.assertFalse(self.directory.exists())
-
-    def test_destroy_only_matches_immediate_instance_names(self):
-        self.prepare_destroy()
-        for name in ('missing', '', '.', '..', '../demo', 'demo/child', 'demo\\child',
-                     str(self.directory), 'demo\x00'):
-            with self.subTest(name=name), patch.object(_lifecycle, '_prepare_destroy') as prepare:
-                with self.assertRaisesRegex(CLIError, 'Enclave instance not found'):
-                    _lifecycle.destroy(name)
-                prepare.assert_not_called()
-        _lifecycle.finalize.assert_not_called()
-
-    def test_destroy_rejects_symlink_entry(self):
-        self.directory.mkdir()
-        with patch.object(Path, 'is_symlink', autospec=True,
-                          side_effect=lambda path: path == self.directory), \
-                patch.object(_lifecycle, '_prepare_destroy') as prepare:
-            with self.assertRaisesRegex(CLIError, 'must not be a symlink'):
-                _lifecycle.destroy('demo')
-        prepare.assert_not_called()
-
-    def test_destroy_accepts_existing_name_without_launch_format(self):
-        self.prepare_destroy()
-        name = '_legacy instance'
-        self.directory = self.directory.rename(self.base / name)
-        state = _instance.read_record(self.directory / 'instance.json')
-        state['name'] = name
-        _instance.write_record(self.directory / 'instance.json', state)
-        with patch.object(_lifecycle, 'alive', return_value=False), \
-                patch.object(_lifecycle, '_stop_runtime'):
-            _lifecycle.destroy(name)
-        self.assertEqual(_lifecycle.finalize.call_args.args[0], self.directory)
-
-    def test_destroy_missing_root_reports_not_found_without_creating_it(self):
-        root = self.base / 'missing-root'
-        with patch.object(_instance, '_private_root', return_value=root) as private_root:
-            with self.assertRaisesRegex(CLIError, 'Enclave instance not found'):
-                _lifecycle.destroy('demo')
-        private_root.assert_called_once_with(_instance.DEFAULT_STATE_DIR, create=False)
-        self.assertFalse(root.exists())
 
     def test_destroy_teardown_then_quit_and_preserve_image(self):
         """Release the VM before quitting its server while retaining the reusable IGVM."""

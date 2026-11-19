@@ -25,8 +25,9 @@ class IsolationManifestTest(unittest.TestCase):
     def test_installed_resource_lookup_is_explicit(self) -> None:
         """Load the enabled packaged manifest while rejecting unknown types and caller-supplied paths."""
         configuration = _isolation.load_isolation()
-        self.assertEqual(configuration.isolation_type, 'snp')
+        self.assertIs(configuration.isolation_type, _isolation.IsolationType.SNP)
         self.assertEqual(configuration.dependency_bundle.profile, 'measured-pcie-v1')
+        self.assertEqual(configuration.image.command_line, self.document['image']['command_line'])
         with patch.object(_isolation.resources, 'files') as lookup:
             for value in ('tdx', 'native', '../snp', '/tmp/snp.json', ''):
                 with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'not enabled'):
@@ -46,11 +47,13 @@ class IsolationManifestTest(unittest.TestCase):
                 _isolation.load_isolation()
 
     def test_registration_alone_does_not_implement_a_manifest_contract(self) -> None:
-        """Require Python implementation support even when another isolation manifest is registered."""
-        self.document['isolation_type'] = 'tdx'
-        with patch.dict(_isolation._ENABLED_MANIFESTS, {'tdx': 'manifests/tdx.json'}):
+        """Do not impose SNP's schema on a registered type that has no parser."""
+        document = {'different_manifest_format': True}
+        with patch.dict(_isolation._ENABLED_MANIFESTS, {'tdx': 'manifests/tdx.json'}), \
+                patch.object(_isolation, '_parse_snp_manifest') as snp_parser:
             with self.assertRaisesRegex(ValueError, 'Unsupported isolation configuration type: tdx'):
-                _isolation.parse_manifest(self.document, 'tdx')
+                _isolation.parse_manifest(document, 'tdx')
+            snp_parser.assert_not_called()
 
     def test_backend_requirements_do_not_depend_on_the_isolation_validator(self) -> None:
         """Reject unsupported backends and missing backend devices before isolation-specific validation."""
@@ -98,6 +101,8 @@ class IsolationManifestTest(unittest.TestCase):
                 [], ['kernel'], ['kernel'] * 5, ['kernel', {}], 'kernel'),
             'defaults.processor_count': (True, 1.0, 0, -1, 1 << 32),
             'defaults.memory_mib': (False, '160', 0, -1, 1 << 64),
+            'image': (None, [], 'console=ttyS0'),
+            'image.command_line': (None, True, 1, [], {}),
             'runtime.backend': ('kvm', None),
             'runtime.disable_vmbus': (1, 'true', None),
             'runtime.disable_hv': (0, 'false', None),
@@ -125,6 +130,14 @@ class IsolationManifestTest(unittest.TestCase):
                     section[keys[-1]] = value
                     with self.assertRaises(ValueError):
                         _isolation.parse_manifest(document, 'snp')
+
+    def test_kernel_command_line_is_preserved(self) -> None:
+        """Allow an empty command line and preserve kernel argument spacing and quotes."""
+        for value in ('', 'console=ttyS0  init="/bin/custom init" panic=-1'):
+            with self.subTest(value=value):
+                self.document['image']['command_line'] = value
+                configuration = _isolation.parse_manifest(self.document, 'snp')
+                self.assertEqual(configuration.image.command_line, value)
 
     def test_unknown_fields_are_not_silently_ignored(self) -> None:
         """Reject undeclared manifest fields rather than silently ignoring misspelled settings."""

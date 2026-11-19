@@ -34,13 +34,13 @@ def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str]
                    application: Optional[str] = None, keep_intermediates: bool = False) -> dict:
     """Compose an IGVM from trusted dependencies and a packaged or caller-supplied application."""
     from ._image_builder import IgvmBuildError, SnpBuildOptions, build_igvm, validate_build_configuration
-    from ._isolation import load_isolation
+    from ._isolation import IsolationType, load_isolation
     try:
         configuration = load_isolation()
         enable_guest_debug = '--debug' in cmd.cli_ctx.data['safe_params']
         isolation_options: Optional[SnpBuildOptions] = None
         if signing_key is not None:
-            if configuration.isolation_type != 'snp':
+            if configuration.isolation_type != IsolationType.SNP:
                 raise ValueError(
                     'SNP ID-block signing is not supported for isolation type: ' + configuration.isolation_type)
             isolation_options = SnpBuildOptions(signing_key=Path(signing_key).expanduser())
