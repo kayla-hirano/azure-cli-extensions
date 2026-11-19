@@ -111,9 +111,9 @@ class EnclaveCommandTest(unittest.TestCase):
                     'vsock': {'port': 4050, 'socket': 'vsock.sock'},
                     'rpc_socket': 'rpc.sock',
                     'logs': {'openvmm': 'openvmm.log', 'supervisor': 'supervisor.log', 'com1': 'com1.log'},
-                    'instance_file': 'instance.json', 'response_file': 'response.json',
+                    'instance_file': 'instance.json',
                 }
-                state = dict(public, attestation_verified=False, directory='instance-directory',
+                state = dict(public, directory='instance-directory',
                              openvmm='openvmm', openvmm_sha256='runtime-hash', supervisor=supervisor)
                 original = state.copy()
                 with patch('azext_enclave._lifecycle.' + operation, return_value=state):

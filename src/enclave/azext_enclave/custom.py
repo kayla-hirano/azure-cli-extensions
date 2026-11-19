@@ -82,7 +82,7 @@ def create_enclave(cmd: AzCliCommand, output_file: str, workspace: Optional[str]
 
 def _instance_result(state: dict) -> dict:
     """Keep process ownership records internal while exposing the supervisor PID."""
-    excluded = {'attestation_verified', 'directory', 'openvmm', 'openvmm_sha256', 'supervisor'}
+    excluded = {'directory', 'openvmm', 'openvmm_sha256', 'supervisor'}
     result = {key: value for key, value in state.items() if key not in excluded}
     if state.get('supervisor') is not None:
         result['supervisor_pid'] = state['supervisor']['pid']

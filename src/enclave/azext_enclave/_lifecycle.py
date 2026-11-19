@@ -3,20 +3,15 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
-"""Coordinate local L1 launch/destroy, RPC calls, guest readiness, and failure recovery."""
+"""Coordinate local L1 launch/destroy, RPC calls, and failure recovery."""
 
 import hashlib
-from io import BufferedReader, BufferedRWPair
-import json
 import os
-import secrets
-import socket
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Optional, Union
 
 import grpc
 from knack.log import get_logger
@@ -25,18 +20,17 @@ from knack.util import CLIError
 from ._instance import (alive, check_private, cleanup_sockets, host_lock, identity,
                         instance_lock, instance_path, read_record, require_host, stop_owned,
                         write_record)
-from ._isolation import IsolationType, load_isolation
+from ._isolation import load_isolation
 from ._rpc import VmClient, create_request, validate_launch_configuration
 from ._runtime import resolve_runtime
 from .rpc import vmservice_pb2 as vm
 
 logger = get_logger(__name__)
-MAX_LINE_BYTES = 4 * 1024 * 1024
 GUEST_VSOCK_PORT = 4050
 
 
 def _instance_info(directory: Path) -> dict:
-    """Describe instance endpoints and retained evidence for both lifecycle commands."""
+    """Describe instance endpoints and logs for both lifecycle commands."""
     return {
         'directory': str(directory),
         'vsock': {'port': GUEST_VSOCK_PORT, 'socket': str(directory / 'vsock.sock')},
@@ -47,91 +41,7 @@ def _instance_info(directory: Path) -> dict:
             'com1': str(directory / 'com1.log'),
         },
         'instance_file': str(directory / 'instance.json'),
-        'response_file': str(directory / 'response.json'),
     }
-
-
-def read_line(stream: Union[BufferedReader, BufferedRWPair], connection: Optional[socket.socket] = None,
-              deadline: Optional[float] = None) -> bytes:
-    """Read a buffered relay line in chunks without consuming bytes from the next line."""
-    line = bytearray()
-    while len(line) <= MAX_LINE_BYTES:
-        if connection is not None and deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise CLIError('Guest response timed out.')
-            connection.settimeout(min(5, remaining))
-        available = stream.peek(1)
-        if not available:
-            break
-        newline = available.find(b'\n')
-        size = len(available) if newline < 0 else newline + 1
-        chunk = stream.read(min(size, MAX_LINE_BYTES + 1 - len(line)))
-        line.extend(chunk)
-        if chunk.endswith(b'\n'):
-            break
-    if not line:
-        # The relay can close before the guest listener is ready; let the readiness loop retry.
-        raise ConnectionError('Guest relay closed before returning a response.')
-    if not line.endswith(b'\n') or len(line) > MAX_LINE_BYTES:
-        raise CLIError('Guest relay returned an oversized or unterminated response.')
-    return bytes(line)
-
-
-def _validate_snp_response(value: object) -> None:
-    """Check SNP evidence type, length, and hexadecimal encoding without verifying attestation."""
-    evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
-    report = (evidence.get('report')
-              if isinstance(evidence, dict) and evidence.get('tee') == IsolationType.SNP else None)
-    if not isinstance(report, str) or len(report) != 2368:
-        raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
-    try:
-        bytes.fromhex(report)
-    except ValueError as error:
-        raise CLIError('Guest SNP report is not valid hexadecimal.') from error
-
-
-def _guest_response_validator(isolation_type: IsolationType) -> Callable[[object], None]:
-    """Select an implemented evidence-shape validator before opening the guest connection."""
-    if isolation_type == IsolationType.SNP:
-        return _validate_snp_response
-    raise CLIError('Guest readiness is not implemented for isolation type: ' + isolation_type)
-
-
-def probe_guest(directory: Path, deadline: float, isolation_type: IsolationType = IsolationType.SNP) -> None:
-    """Retry the shared guest exchange and retain evidence after type-specific shape checks."""
-    validate_response = _guest_response_validator(isolation_type)
-    last_error = 'Guest relay has not become available.'
-    challenge = secrets.token_hex(32)
-    while time.monotonic() < deadline:
-        runtime = read_record(directory / 'runtime.json')
-        if not alive(runtime['openvmm']) or not alive(runtime['supervisor']):
-            raise CLIError('OpenVMM or its supervisor exited; inspect the instance logs.')
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(min(5, max(0.01, deadline - time.monotonic())))
-                connection.connect(str(directory / 'vsock.sock'))
-                with connection.makefile('rwb') as stream:
-                    stream.write('CONNECT {}\n'.format(GUEST_VSOCK_PORT).encode('ascii'))
-                    stream.flush()
-                    if not read_line(stream, connection, deadline).startswith(b'OK '):
-                        raise CLIError('OpenVMM rejected the guest relay connection.')
-                    stream.write(json.dumps({
-                        'challenge': challenge, 'payload': 'hello world',
-                    }).encode('utf-8') + b'\n')
-                    stream.flush()
-                    response = read_line(stream, connection, deadline)
-            value = json.loads(response)
-            validate_response(value)
-            (directory / 'response.json').write_bytes(response)
-            return
-        except OSError as error:
-            last_error = str(error)
-            logger.debug('Waiting for enclave application: %s', error)
-            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
-        except (ValueError, TypeError) as error:
-            raise CLIError('Invalid guest JSON response: {}'.format(error)) from error
-    raise CLIError('Guest readiness timed out: {}'.format(last_error))
 
 
 def _wait_runtime(directory: Path, supervisor: dict, deadline: float) -> dict:
@@ -213,10 +123,9 @@ def _rollback_launch(directory: Path, state: dict, error: BaseException) -> None
 def launch(name: str, igvm: str, openvmm: str = 'openvmm',
            timeout: float = 120,
            allow_untested_runtime: bool = False) -> dict:
-    """Create and resume an instance through shared supervision, persistence, and recovery."""
+    """Create and resume an instance."""
     configuration = load_isolation()
     validate_launch_configuration(configuration)
-    _guest_response_validator(configuration.isolation_type)
     require_host(timeout)
     image = Path(igvm).expanduser().resolve()
     if not image.is_file():
@@ -238,7 +147,6 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
             'schema': 1, 'name': name, 'status': 'starting', 'igvm': str(image),
             'openvmm': str(executable), 'directory': str(directory),
             'openvmm_sha256': executable_digest, 'igvm_sha256': image_digest,
-            'attestation_verified': False,
         }
         state.update(_instance_info(directory))
         write_record(directory / 'instance.json', state)
@@ -253,13 +161,8 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
                 state['status'] = 'paused'
                 write_record(directory / 'instance.json', state)
                 client.call('ResumeVM')
-            # Closing the client channel leaves OpenVMM running. Probe the guest via vsock, not gRPC.
-            probe_guest(directory, deadline, configuration.isolation_type)
             state['status'] = 'running'
             write_record(directory / 'instance.json', state)
-            logger.warning(
-                '%s report received; its signature, measurement and trust chain are NOT verified.',
-                configuration.isolation_type)
             return state
         except (CLIError, OSError, ValueError, KeyError, subprocess.SubprocessError, KeyboardInterrupt) as error:
             _rollback_launch(directory, state, error)

@@ -191,8 +191,7 @@ signed SNP ID block does not change the expected launch measurement.
 Launch
 ~~~~~~
 
-Create and resume a VM from the IGVM supplied with ``--igvm``, then wait for
-a guest response containing an SNP-shaped report. This can be create's
+Create and resume a VM from the IGVM supplied with ``--igvm``. This can be create's
 output or your own compatible IGVM. Run as root on L1,
 choosing a new name for every launch. Set ``IGVM`` to your image::
 
@@ -206,7 +205,13 @@ Currently, only one Enclave-managed enclave may be active on an L1, even with
 different names. A second launch fails until the
 existing runtime stops. OpenVMM starts on demand, not during setup.
 
-The default timeout is 120 seconds; change it with ``--timeout``.
+Launch returns after OpenVMM acknowledges resuming the VM. A ``running`` status
+means guest execution was started, not that the guest has finished booting or
+its application is reachable. Launch does not connect to the guest, collect
+attestation reports, or perform heartbeat checks. Check guest readiness and
+attestation separately.
+
+The default startup timeout is 120 seconds; change it with ``--timeout``.
 
 Destroy
 ~~~~~~~
@@ -235,7 +240,7 @@ The launching CLI starts a detached Python supervisor, which starts OpenVMM
 as its child. Both outlive the CLI command::
 
     az enclave launch / destroy -- gRPC via rpc.sock --> OpenVMM
-    az enclave launch ---------- CONNECT via vsock.sock --> guest app, port 4050
+    separate guest client ----- CONNECT via vsock.sock --> guest app, port 4050
     supervisor <------------ COM1 via serial.sock ---- OpenVMM
         |
         +-- owns and reaps the OpenVMM child
@@ -277,22 +282,17 @@ restore ownership of that dedicated directory once::
 
     sudo chown -R -- "$(id -u):$(id -g)" "$ENCLAVE_VENV/azure-config"
 
-View launch evidence
+View launch records
 --------------------
 
-After successful guest readiness, launch saves the JSON response under the
-instance directory. Enclave requires root-owned state directories with mode
+Launch saves instance records and logs. Enclave requires root-owned state directories with mode
 ``0700`` under the fixed root. Your normal user cannot
-enter these directories; use sudo to read the evidence directly without
+enter these directories; use sudo to read the records directly without
 changing directories::
 
     sudo "$ENCLAVE_VENV/bin/python" -m json.tool \
-        /var/lib/enclave/instances/demo-1/response.json
+        /var/lib/enclave/instances/demo-1/instance.json
 
-``evidence.report`` is the hex-encoded 1184-byte SNP report. Enclave checks the
-report's shape, **not** its signature, measurement, challenge binding, or
-certificate chain. Successful launch is not verified attestation and
-performs no key release.
 
 The same directory retains ``instance.json``, ``openvmm.log``,
 ``supervisor.log``, and ``com1.log`` for diagnosis, including after destroy.
@@ -304,7 +304,7 @@ been removed. Choose a destination that does not already exist::
     sudo cp -a -- /var/lib/enclave/instances/demo-1 "$HOME/demo-1-results"
     sudo chown -R -- "$(id -u):$(id -g)" "$HOME/demo-1-results"
     cd "$HOME/demo-1-results"
-    python -m json.tool response.json
+    python -m json.tool instance.json
 
 Keep the original Enclave directory root-owned and private; do not change its
 permissions to gain access. The user-owned copy is a results archive, not a

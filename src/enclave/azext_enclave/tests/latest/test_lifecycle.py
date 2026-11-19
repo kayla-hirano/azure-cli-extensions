@@ -66,9 +66,8 @@ class LifecycleTest(LinuxFilesystemTest):
                       if path == device else original_stat(path, **kwargs)), \
                 patch('azext_enclave._lifecycle.subprocess.Popen') as popen, \
                 patch('azext_enclave._lifecycle.identity', return_value={'pid': 123}), \
-                patch('azext_enclave._lifecycle._wait_runtime') as wait_runtime, \
-                patch('azext_enclave._lifecycle.probe_guest') as probe:
-            yield SimpleNamespace(popen=popen, wait_runtime=wait_runtime, probe=probe)
+                patch('azext_enclave._lifecycle._wait_runtime') as wait_runtime:
+            yield SimpleNamespace(popen=popen, wait_runtime=wait_runtime)
 
     def prepare_destroy(self):
         """Seed matching instance/runtime records for destruction and crash-recovery scenarios."""
@@ -131,7 +130,7 @@ class LifecycleTest(LinuxFilesystemTest):
         self.assertEqual(saved['cleanup_error'], 'still alive')
 
     def test_launch_create_then_resume_and_persist(self):
-        """Check creation precedes resume and successful readiness produces persistent running state."""
+        """Return running state after resume."""
         with self.mock_launch_runtime() as runtime:
             result = _lifecycle.launch('demo', str(self.image))
             self.assertEqual(result['status'], 'running')
@@ -145,32 +144,26 @@ class LifecycleTest(LinuxFilesystemTest):
                 for name in ('openvmm', 'supervisor', 'com1')
             })
             self.assertEqual(result['instance_file'], str(self.directory / 'instance.json'))
-            self.assertEqual(result['response_file'], str(self.directory / 'response.json'))
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                              ['CreateVM', 'ResumeVM'])
-            runtime.probe.assert_called_once()
+            self.client.ready.assert_called_once()
             self.assertTrue(runtime.popen.call_args.kwargs['start_new_session'])
             self.assertEqual(runtime.popen.call_args.kwargs['pass_fds'], (47,))
         self.assertEqual(_instance.read_record(self.directory / 'instance.json'), result)
 
     def test_launch_uses_manifest_without_changing_instance_schema(self) -> None:
-        """Apply manifest resources and evidence handling while preserving schema 1 and the attestation disclaimer."""
+        """Apply manifest resources and preserve schema 1."""
         configuration = load_isolation()
         configuration = replace(configuration, defaults=replace(
             configuration.defaults, processor_count=2, memory_mib=256))
-        with self.mock_launch_runtime() as runtime, \
-                patch.object(_lifecycle, 'load_isolation', return_value=configuration), \
-                patch.object(_lifecycle.logger, 'warning') as warning:
+        with self.mock_launch_runtime(), \
+                patch.object(_lifecycle, 'load_isolation', return_value=configuration):
             result = _lifecycle.launch('demo', str(self.image))
         request = self.client.call.call_args_list[0].args[1]
         self.assertEqual(request.config.processor_config.processor_count, 2)
         self.assertEqual(request.config.memory_config.memory_mb, 256)
         self.assertEqual(result['schema'], 1)
         self.assertNotIn('isolation_type', result)
-        runtime.probe.assert_called_once_with(self.directory, runtime.probe.call_args.args[1], 'snp')
-        warning.assert_called_once_with(
-            '%s report received; its signature, measurement and trust chain are NOT verified.',
-            configuration.isolation_type)
 
     def test_invalid_manifest_fails_before_instance_creation(self) -> None:
         """Reject invalid isolation metadata before resolving the runtime or creating instance state."""
@@ -184,23 +177,17 @@ class LifecycleTest(LinuxFilesystemTest):
         self.assertFalse(self.directory.exists())
 
     def test_missing_launch_implementations_fail_before_host_or_instance_changes(self) -> None:
-        """Require both RPC and guest-readiness implementations before performing host or instance operations."""
+        """Require an RPC launch implementation before performing host or instance operations."""
         configuration = replace(load_isolation(), isolation_type='tdx')
-        for rpc_supported, message in (
-                (False, 'RPC launch is not implemented'),
-                (True, 'Guest readiness is not implemented')):
-            with self.subTest(rpc_supported=rpc_supported), \
-                    patch.object(_lifecycle, 'load_isolation', return_value=configuration), \
-                    patch.object(_lifecycle, 'require_host') as host, \
-                    patch.object(_lifecycle, 'resolve_runtime') as resolve, \
-                    patch.object(_lifecycle, 'instance_path') as instance:
-                rpc_check = (patch.object(_lifecycle, 'validate_launch_configuration')
-                             if rpc_supported else nullcontext())
-                with rpc_check, self.assertRaisesRegex((ValueError, CLIError), message):
-                    _lifecycle.launch('demo', str(self.image))
-                host.assert_not_called()
-                resolve.assert_not_called()
-                instance.assert_not_called()
+        with patch.object(_lifecycle, 'load_isolation', return_value=configuration), \
+                patch.object(_lifecycle, 'require_host') as host, \
+                patch.object(_lifecycle, 'resolve_runtime') as resolve, \
+                patch.object(_lifecycle, 'instance_path') as instance:
+            with self.assertRaisesRegex(ValueError, 'RPC launch is not implemented'):
+                _lifecycle.launch('demo', str(self.image))
+            host.assert_not_called()
+            resolve.assert_not_called()
+            instance.assert_not_called()
         self.assertFalse(self.directory.exists())
 
     def test_manifest_host_requirements_fail_before_instance_creation(self) -> None:
@@ -230,7 +217,6 @@ class LifecycleTest(LinuxFilesystemTest):
         self.assertEqual(result['name'], 'demo')
         self.assertEqual(result['vsock']['port'], 4050)
         self.assertEqual(result['logs']['com1'], str(self.directory / 'com1.log'))
-        self.assertEqual(result['response_file'], str(self.directory / 'response.json'))
         self.assertEqual(_instance.read_record(self.directory / 'instance.json'), result)
         self.assertTrue(self.image.exists())
 
@@ -443,10 +429,9 @@ class LifecycleTest(LinuxFilesystemTest):
         state = _instance.read_record(self.directory / 'instance.json')
         self.assertEqual(state['status'], 'failed')
         self.assertEqual(len(state['igvm_sha256']), 64)
-        self.assertFalse(state['attestation_verified'])
 
     def test_resume_failure_quits_created_vm_and_recovers_owned_processes(self):
-        """Quit and clean up a created VM when resume fails, without probing an unstarted guest."""
+        """Quit and clean up a created VM when resume fails."""
         def rpc_call(method, *_args):
             """Simulate successful creation/quit but an explicit ResumeVM failure."""
             if method == 'ResumeVM':
@@ -454,7 +439,7 @@ class LifecycleTest(LinuxFilesystemTest):
             return Empty()
 
         self.client.call.side_effect = rpc_call
-        with self.mock_launch_runtime() as runtime, \
+        with self.mock_launch_runtime(), \
                 patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
                 patch('azext_enclave._lifecycle._stop_runtime') as stop:
             with self.assertRaisesRegex(CLIError, 'Launch failed.*resume rejected'):
@@ -462,5 +447,4 @@ class LifecycleTest(LinuxFilesystemTest):
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                              ['CreateVM', 'ResumeVM', 'Quit'])
             stop.assert_called_once()
-            runtime.probe.assert_not_called()
         self.assertEqual(_instance.read_record(self.directory / 'instance.json')['status'], 'failed')
