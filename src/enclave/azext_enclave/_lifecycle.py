@@ -17,10 +17,16 @@ import grpc
 from knack.log import get_logger
 from knack.util import CLIError
 
+from . import _instance
 from ._instance import (alive, check_private, cleanup_sockets, host_lock, identity,
                         instance_lock, instance_path, read_record, require_host, stop_owned,
                         write_record)
 from ._isolation import load_isolation
+                        instance_lock, instance_path, new_name, read_record, require_host, stop_owned,
+                        sync_directory, write_record)
+from ._cleanup import (LOG_NAMES, archive_path, finalize, finalization_error, read_private_record,
+                       staging_path)
+from ._isolation import IsolationType, load_isolation
 from ._rpc import VmClient, create_request, validate_launch_configuration
 from ._runtime import resolve_runtime
 from .rpc import vmservice_pb2 as vm
@@ -41,7 +47,98 @@ def _instance_info(directory: Path) -> dict:
             'com1': str(directory / 'com1.log'),
         },
         'instance_file': str(directory / 'instance.json'),
+        'response_file': str(directory / 'response.json'),
     }
+
+
+def read_line(stream: Union[BufferedReader, BufferedRWPair], connection: Optional[socket.socket] = None,
+              deadline: Optional[float] = None) -> bytes:
+    """Read a buffered relay line in chunks without consuming bytes from the next line."""
+    line = bytearray()
+    while len(line) <= MAX_LINE_BYTES:
+        if connection is not None and deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CLIError('Guest response timed out.')
+            connection.settimeout(min(5, remaining))
+        available = stream.peek(1)
+        if not available:
+            break
+        newline = available.find(b'\n')
+        size = len(available) if newline < 0 else newline + 1
+        chunk = stream.read(min(size, MAX_LINE_BYTES + 1 - len(line)))
+        line.extend(chunk)
+        if chunk.endswith(b'\n'):
+            break
+    if not line:
+        # The relay can close before the guest listener is ready; let the readiness loop retry.
+        raise ConnectionError('Guest relay closed before returning a response.')
+    if not line.endswith(b'\n') or len(line) > MAX_LINE_BYTES:
+        raise CLIError('Guest relay returned an oversized or unterminated response.')
+    return bytes(line)
+
+
+def _validate_snp_response(value: object) -> None:
+    """Check SNP evidence type, length, and hexadecimal encoding without verifying attestation."""
+    evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
+    report = (evidence.get('report')
+              if isinstance(evidence, dict) and evidence.get('tee') == IsolationType.SNP else None)
+    if not isinstance(report, str) or len(report) != 2368:
+        raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
+    try:
+        bytes.fromhex(report)
+    except ValueError as error:
+        raise CLIError('Guest SNP report is not valid hexadecimal.') from error
+
+
+def _guest_response_validator(isolation_type: IsolationType) -> Callable[[object], None]:
+    """Select an implemented evidence-shape validator before opening the guest connection."""
+    if isolation_type == IsolationType.SNP:
+        return _validate_snp_response
+    raise CLIError('Guest readiness is not implemented for isolation type: ' + isolation_type)
+
+
+def probe_guest(directory: Path, deadline: float, isolation_type: IsolationType = IsolationType.SNP) -> None:
+    """Retry the shared guest exchange and retain evidence after type-specific shape checks."""
+    validate_response = _guest_response_validator(isolation_type)
+    last_error = 'Guest relay has not become available.'
+    challenge = secrets.token_hex(32)
+    while time.monotonic() < deadline:
+        runtime = read_record(directory / 'runtime.json')
+        if not alive(runtime['openvmm']) or not alive(runtime['supervisor']):
+            raise CLIError('OpenVMM or its supervisor exited; inspect the instance logs.')
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(min(5, max(0.01, deadline - time.monotonic())))
+                connection.connect(str(directory / 'vsock.sock'))
+                with connection.makefile('rwb') as stream:
+                    stream.write('CONNECT {}\n'.format(GUEST_VSOCK_PORT).encode('ascii'))
+                    stream.flush()
+                    if not read_line(stream, connection, deadline).startswith(b'OK '):
+                        raise CLIError('OpenVMM rejected the guest relay connection.')
+                    stream.write(json.dumps({
+                        'challenge': challenge, 'payload': 'hello world',
+                    }).encode('utf-8') + b'\n')
+                    stream.flush()
+                    response = read_line(stream, connection, deadline)
+            value = json.loads(response)
+            validate_response(value)
+        except OSError as error:
+            last_error = str(error)
+            logger.debug('Waiting for enclave application: %s', error)
+            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+        except (ValueError, TypeError) as error:
+            raise CLIError('Invalid guest JSON response: {}'.format(error)) from error
+        else:
+            descriptor = os.open(str(directory / 'response.json'),
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, 'wb') as output:
+                output.write(response)
+                output.flush()
+                os.fsync(output.fileno())
+            sync_directory(directory)
+            return
+    raise CLIError('Guest readiness timed out: {}'.format(last_error))
 
 
 def _wait_runtime(directory: Path, supervisor: dict, deadline: float) -> dict:
@@ -86,10 +183,15 @@ def _file_digest(path: Path) -> str:
 
 
 def _start_supervisor(directory: Path, state: dict, host_lock_fd: int) -> None:
-    """Start the persistent OpenVMM owner and save its process identity."""
+    """Create expected logs, then start the persistent OpenVMM owner and save its identity."""
     environment = os.environ.copy()
     environment['PYTHONPATH'] = str(Path(__file__).resolve().parent.parent) + (
         os.pathsep + environment['PYTHONPATH'] if environment.get('PYTHONPATH') else '')
+    for name in LOG_NAMES:
+        descriptor = os.open(str(directory / name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        os.close(descriptor)
+    state['expected_logs'] = list(LOG_NAMES)
+    write_record(directory / 'instance.json', state)
     with (directory / 'supervisor.log').open('ab') as log:
         worker = subprocess.Popen(
             [sys.executable, '-m', 'azext_enclave._worker', str(directory), str(host_lock_fd)],
@@ -120,10 +222,11 @@ def _rollback_launch(directory: Path, state: dict, error: BaseException) -> None
     write_record(directory / 'instance.json', state)
 
 
-def launch(name: str, igvm: str, openvmm: str = 'openvmm',
+def launch(igvm: str, name_prefix: str = 'enclave', openvmm: str = 'openvmm',
            timeout: float = 120,
            allow_untested_runtime: bool = False) -> dict:
     """Create and resume an instance."""
+    name = new_name(name_prefix)
     configuration = load_isolation()
     validate_launch_configuration(configuration)
     require_host(timeout)
@@ -140,13 +243,22 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
     directory = instance_path(name)
     deadline = time.monotonic() + timeout
     with host_lock() as host_lock_fd, instance_lock(directory):
-        if directory.exists():
-            raise CLIError('Instance already exists. Use a new --name; existing evidence is retained.')
+        if directory.exists() or directory.is_symlink():
+            raise CLIError('Generated instance name already exists; retry launch. Existing state is retained.')
+        archive = archive_path(name)
+        if archive.exists() or archive.is_symlink():
+            raise CLIError('Generated name already has an archive; retry launch. Archive retained: {}'.format(archive))
+        staging = staging_path(archive)
+        if staging.exists() or staging.is_symlink():
+            raise CLIError('Generated name has unfinished log staging; retry launch. Staging retained: {}'.format(
+                staging))
         directory.mkdir(mode=0o700)
+        sync_directory(directory.parent)
         state = {
             'schema': 1, 'name': name, 'status': 'starting', 'igvm': str(image),
             'openvmm': str(executable), 'directory': str(directory),
             'openvmm_sha256': executable_digest, 'igvm_sha256': image_digest,
+            'expected_logs': [],
         }
         state.update(_instance_info(directory))
         write_record(directory / 'instance.json', state)
@@ -165,8 +277,37 @@ def launch(name: str, igvm: str, openvmm: str = 'openvmm',
             write_record(directory / 'instance.json', state)
             return state
         except (CLIError, OSError, ValueError, KeyError, subprocess.SubprocessError, KeyboardInterrupt) as error:
-            _rollback_launch(directory, state, error)
-            raise CLIError('Launch failed: {}. Evidence retained in {}'.format(error, directory)) from error
+            try:
+                _rollback_launch(directory, state, error)
+            except (CLIError, OSError, ValueError, KeyError, subprocess.SubprocessError) as cleanup_error:
+                logger.error('Failed to finish launch rollback for %s; retain %s for recovery: %s',
+                             name, directory, cleanup_error)
+            raise CLIError('Launch failed for {}: {}. State and logs retained in {}. '
+                           'Retry cleanup with az enclave destroy --name {}.'.format(
+                               name, error, directory, name)) from error
+
+
+def _validate_process(record: object) -> None:
+    """Validate saved process information before destroy uses it for shutdown and cleanup."""
+    if (not isinstance(record, dict) or type(record.get('pid')) is not int or record['pid'] <= 1
+            or set(record) != {'pid', 'boot', 'start', 'command'}
+            or any(not isinstance(record.get(key), str) or not record[key]
+                   for key in ('boot', 'start', 'command'))
+            or not re.fullmatch(r'[0-9]+', record['start'])
+            or not re.fullmatch(r'[0-9a-f]{64}', record['command'])
+            or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', record['boot'])):
+        raise CLIError('Invalid process identity; shutdown cannot be confirmed. Retain state for manual recovery.')
+
+
+def _validate_ownership(supervisor: Optional[dict], runtime: dict) -> None:
+    """Check that instance and runtime records identify the same supervisor before destroy uses the runtime."""
+    if supervisor is not None:
+        _validate_process(supervisor)
+    if runtime:
+        _validate_process(runtime.get('openvmm'))
+        _validate_process(runtime.get('supervisor'))
+        if runtime['supervisor'] != supervisor:
+            raise CLIError('Runtime ownership is inconsistent; refusing to use its endpoint.')
 
 
 def _shutdown_runtime(directory: Path, process: dict, deadline: float) -> None:
@@ -191,50 +332,91 @@ def _shutdown_runtime(directory: Path, process: dict, deadline: float) -> None:
             logger.debug('OpenVMM exited before acknowledging Quit: %s', error)
 
 
-def destroy(name: str, timeout: float = 30) -> dict:
-    """Reconcile an instance, tear down its VM through RPC, and preserve logs and image files."""
+def _prepare_destroy(directory: Path, name: str, no_logs: bool) -> Tuple[dict, dict]:
+    """Load validated ownership and persist the log policy before attempting shutdown."""
+    check_private(directory)
+    try:
+        state = read_private_record(directory / 'instance.json')
+    except (CLIError, OSError, ValueError) as error:
+        raise finalization_error(directory, {}, error) from error
+    if state.get('schema') != 1 or state.get('name') != name:
+        raise CLIError('Unsupported or mismatched Enclave instance record: {}. '
+                       'Manual cleanup is required; inspect this record before removing any files.'.format(
+                           directory / 'instance.json'))
+    if 'cleanup_phase' in state:
+        raise finalization_error(directory, state, CLIError('An earlier cleanup attempt did not complete.'))
+    # Match full process identities, not just PIDs, before trusting the management endpoint.
+    runtime_path = directory / 'runtime.json'
+    runtime = {}
+    if runtime_path.exists() or runtime_path.is_symlink():
+        runtime = read_private_record(runtime_path)
+        if not runtime:
+            raise CLIError('Empty runtime ownership record; shutdown cannot be confirmed: {}'.format(runtime_path))
+    recover_supervisor = bool(runtime) and state.get('supervisor') is None
+    supervisor = runtime.get('supervisor') if recover_supervisor else state.get('supervisor')
+    _validate_ownership(supervisor, runtime)
+    if recover_supervisor:
+        logger.warning('Recovering the missing supervisor identity from the owned runtime record: %s', runtime_path)
+        state['supervisor'] = supervisor
+        write_record(directory / 'instance.json', state)
+    policy = 'discard' if no_logs else state.get('log_policy', 'retain')
+    if policy not in ('retain', 'discard'):
+        raise CLIError('Invalid persisted log policy; retain state for manual recovery: {}'.format(directory))
+    state['log_policy'] = policy
+    write_record(directory / 'instance.json', state)
+    return state, runtime
+
+
+def _shutdown_instance(directory: Path, state: dict, runtime: dict, timeout: float) -> None:
+    """Stop through RPC before owned-process recovery, retaining state on either failure."""
+    server_alive = bool(runtime.get('openvmm')) and alive(runtime['openvmm'])
+    worker_alive = bool(state.get('supervisor')) and alive(state['supervisor'])
+    if server_alive:
+        if not worker_alive:
+            logger.warning('Supervisor exited; reconciling the verified owned OpenVMM server via RPC.')
+        try:
+            if not (directory / 'rpc.sock').is_socket():
+                raise CLIError('Owned OpenVMM is alive but RPC socket is missing; destruction is unconfirmed.')
+            _shutdown_runtime(directory, runtime['openvmm'], time.monotonic() + timeout)
+        except (CLIError, OSError, KeyboardInterrupt) as error:
+            # Preserve a retryable failure rather than forcing shutdown after unconfirmed RPC.
+            state['status'] = 'destroy-failed'
+            state['error'] = str(error) or 'Shutdown interrupted.'
+            write_record(directory / 'instance.json', state)
+            raise CLIError('Destroy RPC failed; instance retained for retry: {}. Name: {}. State/logs: {}.'.format(
+                state['error'], state['name'], directory)) from error
+    # Also reconcile a crashed server/supervisor rather than treating a missing socket as success.
+    try:
+        _stop_runtime(directory, state)
+    except (CLIError, OSError, KeyboardInterrupt) as error:
+        state.update(status='destroy-failed', cleanup_error=str(error) or 'Cleanup interrupted.')
+        write_record(directory / 'instance.json', state)
+        raise CLIError('Destroy cleanup incomplete; instance retained for retry: {}. Name: {}. State/logs: {}.'.format(
+            state['cleanup_error'], state['name'], directory)) from error
+    if (directory / 'worker-error.json').exists():
+        logger.warning('Supervisor reported an error; resources are stopped. Inspect supervisor.log.')
+    state['status'] = 'cleanup-pending'
+    state.pop('error', None)
+    state.pop('cleanup_error', None)
+    write_record(directory / 'instance.json', state)
+
+
+def destroy(name: str, timeout: float = 30, no_logs: bool = False) -> dict:
+    """Confirm shutdown, retain logs unless explicitly discarded, and release instance state."""
     require_host(timeout)
-    directory = instance_path(name)
+    root = _instance._private_root(_instance.DEFAULT_STATE_DIR, create=False)
+    directory = next((entry for entry in root.iterdir() if entry.name == name), None) if root.exists() else None
+    if directory is None:
+        raise CLIError('Enclave instance not found: {}'.format(name))
+    if directory.is_symlink():
+        raise CLIError('Instance directory must not be a symlink.')
     with instance_lock(directory):
         if not directory.exists():
             raise CLIError('Enclave instance not found: {}'.format(name))
-        check_private(directory)
-        state = read_record(directory / 'instance.json')
-        if state.get('schema') != 1 or state.get('name') != name:
-            raise CLIError('Unsupported or mismatched Enclave instance record.')
-        state.update(_instance_info(directory))
-        # Match full process identities, not just PIDs, before trusting the management endpoint.
-        runtime_path = directory / 'runtime.json'
-        runtime = read_record(runtime_path) if runtime_path.exists() else {}
-        server_alive = bool(runtime.get('openvmm')) and alive(runtime['openvmm'])
-        worker_alive = bool(state.get('supervisor')) and alive(state['supervisor'])
-        if server_alive and runtime['supervisor'] != state.get('supervisor'):
-            raise CLIError('Runtime ownership is inconsistent; refusing to use its endpoint.')
-        if server_alive:
-            if not worker_alive:
-                logger.warning('Supervisor exited; reconciling the verified owned OpenVMM server via RPC.')
-            try:
-                if not (directory / 'rpc.sock').is_socket():
-                    raise CLIError('Owned OpenVMM is alive but RPC socket is missing; destruction is unconfirmed.')
-                _shutdown_runtime(directory, runtime['openvmm'], time.monotonic() + timeout)
-            except (CLIError, OSError, KeyboardInterrupt) as error:
-                # Preserve a retryable failure rather than forcing shutdown after unconfirmed RPC.
-                state['status'] = 'destroy-failed'
-                state['error'] = str(error) or 'Shutdown interrupted.'
-                write_record(directory / 'instance.json', state)
-                raise CLIError('Destroy RPC failed; instance retained for retry: {}'.format(state['error'])) from error
-        # Also reconcile a crashed server/supervisor rather than treating a missing socket as success.
+        state, runtime = _prepare_destroy(directory, name, no_logs)
+        _shutdown_instance(directory, state, runtime, timeout)
         try:
-            _stop_runtime(directory, state)
+            with host_lock():
+                return finalize(directory, state)
         except (CLIError, OSError, KeyboardInterrupt) as error:
-            state.update(status='destroy-failed', cleanup_error=str(error) or 'Cleanup interrupted.')
-            write_record(directory / 'instance.json', state)
-            raise CLIError('Destroy cleanup incomplete; instance retained for retry: {}'.format(
-                state['cleanup_error'])) from error
-        if (directory / 'worker-error.json').exists():
-            logger.warning('Supervisor reported an error; resources are stopped. Inspect supervisor.log.')
-        state['status'] = 'destroyed'
-        state.pop('error', None)
-        state.pop('cleanup_error', None)
-        write_record(directory / 'instance.json', state)
-        return state
+            raise finalization_error(directory, state, error) from error

@@ -81,28 +81,28 @@ def create_enclave(cmd: AzCliCommand, output_file: str, application: str, worksp
 
 def _instance_result(state: dict) -> dict:
     """Keep process ownership records internal while exposing the supervisor PID."""
-    excluded = {'directory', 'openvmm', 'openvmm_sha256', 'supervisor'}
+    excluded = {'directory', 'expected_logs', 'openvmm', 'openvmm_sha256', 'supervisor'}
     result = {key: value for key, value in state.items() if key not in excluded}
     if state.get('supervisor') is not None:
         result['supervisor_pid'] = state['supervisor']['pid']
     return result
 
 
-def launch_enclave(name: str, igvm: str, openvmm: str = 'openvmm',
+def launch_enclave(igvm: str, name_prefix: str = 'enclave', openvmm: str = 'openvmm',
                    timeout: float = 120,
                    allow_untested_runtime: bool = False) -> dict:
     """Delegate local RPC launch and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import launch
     try:
-        return _instance_result(launch(name, igvm, openvmm, timeout, allow_untested_runtime))
+        return _instance_result(launch(igvm, name_prefix, openvmm, timeout, allow_untested_runtime))
     except (OSError, ValueError, KeyError) as error:
         raise CLIError('Unable to launch Enclave instance: {}'.format(error)) from error
 
 
-def destroy_enclave(name: str, timeout: float = 30) -> dict:
+def destroy_enclave(name: str, timeout: float = 30, no_logs: bool = False) -> dict:
     """Delegate instance teardown and translate filesystem/record errors for Azure CLI users."""
     from ._lifecycle import destroy
     try:
-        return _instance_result(destroy(name, timeout))
+        return destroy(name, timeout, no_logs)
     except (OSError, ValueError, KeyError) as error:
         raise CLIError('Unable to destroy Enclave instance: {}'.format(error)) from error

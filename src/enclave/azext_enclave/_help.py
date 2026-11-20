@@ -62,25 +62,27 @@ helps['enclave launch'] = """
     type: command
     short-summary: Start a local enclave from an existing image.
     long-summary: >
-        Run as root on Linux L1 after setup. Choose an unused name.
+        Run as root on Linux L1 after setup. Generates an immutable name from --name-prefix and a fresh GUID.
         The enclave keeps running after this command exits; destroy it before launching another.
-        Returns status and log paths under /var/lib/enclave/instances.
+        Returns the full name, status and log paths under /var/lib/enclave/instances.
         Returns after OpenVMM resumes the VM.
         Currently, SNP is the implicit and only enabled isolation type.
     examples:
       - name: Launch an image created with enclave create.
-        text: sudo az enclave launch --name demo --igvm ./enclave.igvm
+        text: sudo az enclave launch --name-prefix demo --igvm ./enclave.igvm
 """
 
 helps['enclave destroy'] = """
     type: command
-    short-summary: Stop a local enclave and its runtime.
+    short-summary: Stop a local enclave, archive logs, and remove instance data.
     long-summary: >
         Run as root on the same Linux L1 used for launch.
-        Stops the enclave and preserves its image, logs, and instance record.
-        Retained records reserve their names; use a new name for the next launch.
-        If destruction fails, inspect the logs and retry; failure does not confirm the enclave stopped.
+        Confirms runtime and log writers have exited, archives only com1.log, openvmm.log and supervisor.log
+        under /var/log/enclave/<full-name>, then removes operational state and saved guest evidence.
+        Failure does not confirm the enclave stopped. Inspect the reported status, error and paths.
     examples:
       - name: Destroy a local instance.
-        text: sudo az enclave destroy --name demo
+        text: sudo az enclave destroy --name demo-01234567-89ab-4cde-8fab-0123456789ab
+      - name: Destroy an instance and discard its unarchived logs.
+        text: sudo az enclave destroy --name demo-01234567-89ab-4cde-8fab-0123456789ab --no-logs
 """

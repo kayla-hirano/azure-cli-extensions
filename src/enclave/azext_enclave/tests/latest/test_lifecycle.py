@@ -11,7 +11,7 @@ from dataclasses import replace
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import grpc
 from google.protobuf.empty_pb2 import Empty
@@ -37,6 +37,9 @@ class LifecycleTest(LinuxFilesystemTest):
         self.image.write_bytes(b'test image')
         self.executable = self.base / 'openvmm'
         self.executable.write_bytes(b'test executable')
+        patcher = patch.object(_instance, '_private_root', return_value=self.base)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patches = {
             'require_host': None,
             'instance_path': self.directory,
@@ -44,11 +47,18 @@ class LifecycleTest(LinuxFilesystemTest):
             'host_lock': nullcontext(47),
             'check_private': None,
             'resolve_runtime': self.executable,
+            'new_name': 'demo',
+            'archive_path': self.base / 'archives' / 'demo',
+            'finalize': {'name': 'demo', 'status': 'destroyed', 'log_disposition': 'archived',
+                         'archive_path': str(self.base / 'archives' / 'demo'), 'removal_outcome': 'removed'},
         }
         for name, result in patches.items():
             patcher = patch('azext_enclave._lifecycle.' + name, return_value=result)
             patcher.start()
             self.addCleanup(patcher.stop)
+        patcher = patch('azext_enclave._lifecycle.read_private_record', side_effect=_instance.read_record)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = patch('azext_enclave._lifecycle.VmClient')
         self.client = patcher.start().return_value.__enter__.return_value
         self.addCleanup(patcher.stop)
@@ -72,17 +82,19 @@ class LifecycleTest(LinuxFilesystemTest):
     def prepare_destroy(self):
         """Seed matching instance/runtime records for destruction and crash-recovery scenarios."""
         self.directory.mkdir()
-        state = {'schema': 1, 'name': 'demo', 'status': 'running', 'supervisor': {'pid': 123}}
+        supervisor = {'pid': 123, 'boot': '00000000-0000-0000-0000-000000000001', 'start': '1', 'command': 'a' * 64}
+        state = {'schema': 1, 'name': 'demo', 'status': 'running', 'supervisor': supervisor,
+                 'expected_logs': []}
         _instance.write_record(self.directory / 'instance.json', state)
         _instance.write_record(self.directory / 'runtime.json', {
-            'supervisor': {'pid': 123}, 'openvmm': {'pid': 456},
+            'supervisor': supervisor, 'openvmm': dict(supervisor, pid=456, start='2', command='b' * 64),
         })
         return state
 
     def test_supervisor_start_preserves_environment_and_records_identity(self) -> None:
         """Keep source discovery and detached process ownership when extracting startup."""
         self.directory.mkdir()
-        state = {'status': 'starting'}
+        state = {'status': 'starting', 'expected_logs': []}
         with patch.dict(os.environ, {'PYTHONPATH': 'existing-source'}), \
                 patch('azext_enclave._lifecycle.subprocess.Popen') as popen, \
                 patch('azext_enclave._lifecycle.identity', return_value={'pid': 123}):
@@ -97,7 +109,7 @@ class LifecycleTest(LinuxFilesystemTest):
             options['env']['PYTHONPATH'],
             str(Path(_lifecycle.__file__).resolve().parent.parent) + os.pathsep + 'existing-source')
         self.assertEqual(_instance.read_record(self.directory / 'instance.json'), {
-            'status': 'starting', 'supervisor': {'pid': 123},
+            'status': 'starting', 'supervisor': {'pid': 123}, 'expected_logs': list(_lifecycle.LOG_NAMES),
         })
 
     def test_supervisor_early_exit_is_reported(self) -> None:
@@ -106,9 +118,9 @@ class LifecycleTest(LinuxFilesystemTest):
         with patch('azext_enclave._lifecycle.subprocess.Popen') as popen, \
                 patch('azext_enclave._lifecycle.identity', return_value=None):
             with self.assertRaisesRegex(CLIError, 'Supervisor failed to start'):
-                _lifecycle._start_supervisor(self.directory, {}, 47)
+                _lifecycle._start_supervisor(self.directory, {'expected_logs': []}, 47)
         popen.return_value.wait.assert_called_once_with(timeout=5)
-        self.assertFalse((self.directory / 'instance.json').exists())
+        self.assertNotIn('supervisor', _instance.read_record(self.directory / 'instance.json'))
 
     def test_rollback_retains_original_error_when_cleanup_fails(self) -> None:
         """Recover after failed Quit and record cleanup errors without hiding the launch error."""
@@ -132,7 +144,7 @@ class LifecycleTest(LinuxFilesystemTest):
     def test_launch_create_then_resume_and_persist(self):
         """Return running state after resume."""
         with self.mock_launch_runtime() as runtime:
-            result = _lifecycle.launch('demo', str(self.image))
+            result = _lifecycle.launch(str(self.image), 'demo')
             self.assertEqual(result['status'], 'running')
             self.assertEqual(result['name'], 'demo')
             self.assertEqual(result['vsock'], {
@@ -158,7 +170,7 @@ class LifecycleTest(LinuxFilesystemTest):
             configuration.defaults, processor_count=2, memory_mib=256))
         with self.mock_launch_runtime(), \
                 patch.object(_lifecycle, 'load_isolation', return_value=configuration):
-            result = _lifecycle.launch('demo', str(self.image))
+            result = _lifecycle.launch(str(self.image), 'demo')
         request = self.client.call.call_args_list[0].args[1]
         self.assertEqual(request.config.processor_config.processor_count, 2)
         self.assertEqual(request.config.memory_config.memory_mb, 256)
@@ -171,7 +183,7 @@ class LifecycleTest(LinuxFilesystemTest):
                 patch.object(_lifecycle, 'load_isolation', side_effect=ValueError('bad manifest')), \
                 patch.object(_lifecycle, 'resolve_runtime') as resolve:
             with self.assertRaisesRegex(ValueError, 'bad manifest'):
-                _lifecycle.launch('demo', str(self.image))
+                _lifecycle.launch(str(self.image), 'demo')
         runtime.popen.assert_not_called()
         resolve.assert_not_called()
         self.assertFalse(self.directory.exists())
@@ -184,7 +196,7 @@ class LifecycleTest(LinuxFilesystemTest):
                 patch.object(_lifecycle, 'resolve_runtime') as resolve, \
                 patch.object(_lifecycle, 'instance_path') as instance:
             with self.assertRaisesRegex(ValueError, 'RPC launch is not implemented'):
-                _lifecycle.launch('demo', str(self.image))
+                _lifecycle.launch(str(self.image), 'demo')
             host.assert_not_called()
             resolve.assert_not_called()
             instance.assert_not_called()
@@ -196,28 +208,78 @@ class LifecycleTest(LinuxFilesystemTest):
         with self.mock_launch_runtime() as runtime, \
                 patch.object(_lifecycle, 'load_isolation', return_value=configuration):
             with self.assertRaisesRegex(CLIError, '/dev/required character device'):
-                _lifecycle.launch('demo', str(self.image))
+                _lifecycle.launch(str(self.image), 'demo')
         runtime.popen.assert_not_called()
         self.assertFalse(self.directory.exists())
 
+    def test_destroy_only_matches_immediate_instance_names(self):
+        self.prepare_destroy()
+        for name in ('missing', '', '.', '..', '../demo', 'demo/child', 'demo\\child',
+                     str(self.directory), 'demo\x00'):
+            with self.subTest(name=name), patch.object(_lifecycle, '_prepare_destroy') as prepare:
+                with self.assertRaisesRegex(CLIError, 'Enclave instance not found'):
+                    _lifecycle.destroy(name)
+                prepare.assert_not_called()
+        _lifecycle.finalize.assert_not_called()
+
+    def test_destroy_rejects_symlink_entry(self):
+        self.directory.mkdir()
+        with patch.object(Path, 'is_symlink', autospec=True,
+                          side_effect=lambda path: path == self.directory), \
+                patch.object(_lifecycle, '_prepare_destroy') as prepare:
+            with self.assertRaisesRegex(CLIError, 'must not be a symlink'):
+                _lifecycle.destroy('demo')
+        prepare.assert_not_called()
+
+    def test_destroy_accepts_existing_name_without_launch_format(self):
+        self.prepare_destroy()
+        name = '_legacy instance'
+        self.directory = self.directory.rename(self.base / name)
+        state = _instance.read_record(self.directory / 'instance.json')
+        state['name'] = name
+        _instance.write_record(self.directory / 'instance.json', state)
+        with patch.object(_lifecycle, 'alive', return_value=False), \
+                patch.object(_lifecycle, '_stop_runtime'):
+            _lifecycle.destroy(name)
+        self.assertEqual(_lifecycle.finalize.call_args.args[0], self.directory)
+
+    def test_destroy_missing_root_reports_not_found_without_creating_it(self):
+        root = self.base / 'missing-root'
+        with patch.object(_instance, '_private_root', return_value=root) as private_root:
+            with self.assertRaisesRegex(CLIError, 'Enclave instance not found'):
+                _lifecycle.destroy('demo')
+        private_root.assert_called_once_with(_instance.DEFAULT_STATE_DIR, create=False)
+        self.assertFalse(root.exists())
+
     def test_destroy_teardown_then_quit_and_preserve_image(self):
         """Release the VM before quitting its server while retaining the reusable IGVM."""
-        self.prepare_destroy()
+        state = self.prepare_destroy()
+        state['logs'] = {'com1': 'saved log metadata'}
+        _instance.write_record(self.directory / 'instance.json', state)
         self.client.call.return_value = vm.PropertiesVMResponse(state=vm.Running)
         with patch('azext_enclave._lifecycle.alive', return_value=True), \
                 patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
                 patch('azext_enclave._lifecycle.host_lock') as host_guard, \
+                patch.object(_lifecycle, '_instance_info', side_effect=AssertionError('Do not rebuild launch metadata')), \
                 patch('azext_enclave._lifecycle._stop_runtime') as stop:
+            stages = Mock()
+            for name, stage in (
+                    ('stop', stop), ('acquire', host_guard.return_value.__enter__),
+                    ('finalize', _lifecycle.finalize), ('release', host_guard.return_value.__exit__)):
+                stages.attach_mock(stage, name)
             result = _lifecycle.destroy('demo')
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                              ['PropertiesVM', 'TeardownVM', 'Quit'])
             stop.assert_called_once()
-            host_guard.assert_not_called()
+            host_guard.assert_called_once_with()
+            self.assertEqual([call[0] for call in stages.mock_calls], ['stop', 'acquire', 'finalize', 'release'])
         self.assertEqual(result['status'], 'destroyed')
         self.assertEqual(result['name'], 'demo')
-        self.assertEqual(result['vsock']['port'], 4050)
-        self.assertEqual(result['logs']['com1'], str(self.directory / 'com1.log'))
-        self.assertEqual(_instance.read_record(self.directory / 'instance.json'), result)
+        self.assertEqual(result['removal_outcome'], 'removed')
+        self.assertEqual(result['log_disposition'], 'archived')
+        saved = _instance.read_record(self.directory / 'instance.json')
+        self.assertEqual(saved['status'], 'cleanup-pending')
+        self.assertEqual(saved['logs'], state['logs'])
         self.assertTrue(self.image.exists())
 
     def test_launch_rejects_busy_host_before_starting_processes(self) -> None:
@@ -226,21 +288,49 @@ class LifecycleTest(LinuxFilesystemTest):
                 patch('azext_enclave._lifecycle.host_lock',
                       side_effect=CLIError('An enclave is already starting or running on this L1.')):
             with self.assertRaisesRegex(CLIError, 'already starting or running'):
-                _lifecycle.launch('another-demo', str(self.image))
+                _lifecycle.launch(str(self.image), 'another-demo')
             runtime.popen.assert_not_called()
         self.assertFalse(self.directory.exists())
+
+    def test_launch_rejects_unfinished_log_staging(self):
+        staging = _lifecycle.staging_path(self.base / 'archives' / 'demo')
+        staging.mkdir(parents=True)
+        with self.mock_launch_runtime() as runtime:
+            with self.assertRaisesRegex(CLIError, 'unfinished log staging'):
+                _lifecycle.launch(str(self.image), 'demo')
+        runtime.popen.assert_not_called()
+        self.assertFalse(self.directory.exists())
+        self.assertTrue(staging.is_dir())
 
     def test_destroy_rpc_failure_preserves_state_for_retry(self):
         """Keep failed destruction explicit and retryable instead of claiming cleanup succeeded."""
         self.prepare_destroy()
         self.client.call.side_effect = CLIError('RPC unavailable')
-        with patch('azext_enclave._lifecycle.alive', return_value=True), \
-                patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
-                patch('azext_enclave._lifecycle._stop_runtime') as stop:
-            with self.assertRaisesRegex(CLIError, 'retained for retry'):
-                _lifecycle.destroy('demo')
-            stop.assert_not_called()
-        self.assertEqual(_instance.read_record(self.directory / 'instance.json')['status'], 'destroy-failed')
+        for no_logs in (False, True):
+            with self.subTest(no_logs=no_logs), \
+                    patch('azext_enclave._lifecycle.alive', return_value=True), \
+                    patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
+                    patch('azext_enclave._lifecycle._stop_runtime') as stop:
+                with self.assertRaisesRegex(CLIError, 'retained for retry'):
+                    _lifecycle.destroy('demo', no_logs=no_logs)
+                stop.assert_not_called()
+        _lifecycle.finalize.assert_not_called()
+        _lifecycle.host_lock.assert_not_called()
+        saved = _instance.read_record(self.directory / 'instance.json')
+        self.assertEqual(saved['status'], 'destroy-failed')
+        self.assertEqual(saved['log_policy'], 'discard')
+
+    def test_busy_host_lock_blocks_finalization(self):
+        self.prepare_destroy()
+        for no_logs in (False, True):
+            with self.subTest(no_logs=no_logs), \
+                    patch.object(_lifecycle, 'alive', return_value=False), \
+                    patch.object(_lifecycle, '_stop_runtime'), \
+                    patch.object(_lifecycle, 'host_lock', side_effect=CLIError('Host-wide lock is busy')):
+                with self.assertRaisesRegex(CLIError, 'finalization incomplete.*Host-wide lock is busy'):
+                    _lifecycle.destroy('demo', no_logs=no_logs)
+        _lifecycle.finalize.assert_not_called()
+        self.assertTrue((self.directory / 'instance.json').exists())
 
     def quit_error(self, status: grpc.StatusCode = grpc.StatusCode.UNAVAILABLE) -> CLIError:
         class TransportError(grpc.RpcError):
@@ -271,8 +361,9 @@ class LifecycleTest(LinuxFilesystemTest):
                     self.assertEqual(result['status'], 'destroyed')
                     self.assertNotIn('error', result)
                     self.assertNotIn('cleanup_error', result)
-                    self.assertEqual(result, _instance.read_record(self.directory / 'instance.json'))
-                    stop.assert_called_once_with(self.directory, result)
+                    self.assertEqual(
+                        _instance.read_record(self.directory / 'instance.json')['status'], 'cleanup-pending')
+                    self.assertEqual(stop.call_args.args[0], self.directory)
                     self.assertEqual(sleep.call_count, len(checks) - 3)
                 self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                                  ['PropertiesVM', 'TeardownVM', 'Quit'])
@@ -373,23 +464,21 @@ class LifecycleTest(LinuxFilesystemTest):
         self.assertEqual(state['status'], 'destroy-failed')
         self.assertEqual(state['error'], 'Shutdown interrupted.')
 
-    def test_repeated_destroy_reconciles_dead_processes(self):
-        """Allow repeated cleanup of a recorded instance whose processes have already exited."""
+    def test_destroy_reconciles_dead_processes_without_rpc(self):
+        """Finalize stopped instances without requiring a live management endpoint."""
         self.prepare_destroy()
         with patch('azext_enclave._lifecycle.alive', return_value=False), \
                 patch('azext_enclave._lifecycle._stop_runtime'):
-            first = _lifecycle.destroy('demo')
-            second = _lifecycle.destroy('demo')
-            self.assertEqual(first, second)
-            self.assertEqual(second['status'], 'destroyed')
-            self.assertEqual(second['vsock']['port'], 4050)
-            self.assertEqual(second['logs']['openvmm'], str(self.directory / 'openvmm.log'))
+            result = _lifecycle.destroy('demo')
+            self.assertEqual(result['status'], 'destroyed')
+            self.assertEqual(result['log_disposition'], 'archived')
+        _lifecycle.finalize.assert_called_once()
         self.client.call.assert_not_called()
 
     def test_destroy_refuses_mismatched_ownership(self):
         """Refuse RPC access when persisted supervisor identities disagree."""
         state = self.prepare_destroy()
-        state['supervisor'] = {'pid': 999}
+        state['supervisor']['pid'] = 999
         _instance.write_record(self.directory / 'instance.json', state)
         with patch('azext_enclave._lifecycle.alive', return_value=True):
             with self.assertRaisesRegex(CLIError, 'ownership is inconsistent'):
@@ -424,7 +513,7 @@ class LifecycleTest(LinuxFilesystemTest):
                 patch('azext_enclave._lifecycle._stop_runtime') as stop:
             runtime.wait_runtime.side_effect = CLIError('startup timeout')
             with self.assertRaisesRegex(CLIError, 'Launch failed.*startup timeout'):
-                _lifecycle.launch('demo', str(self.image))
+                _lifecycle.launch(str(self.image), 'demo')
             stop.assert_called_once()
         state = _instance.read_record(self.directory / 'instance.json')
         self.assertEqual(state['status'], 'failed')
@@ -443,8 +532,73 @@ class LifecycleTest(LinuxFilesystemTest):
                 patch('azext_enclave._lifecycle.Path.is_socket', return_value=True), \
                 patch('azext_enclave._lifecycle._stop_runtime') as stop:
             with self.assertRaisesRegex(CLIError, 'Launch failed.*resume rejected'):
-                _lifecycle.launch('demo', str(self.image))
+                _lifecycle.launch(str(self.image), 'demo')
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                              ['CreateVM', 'ResumeVM', 'Quit'])
             stop.assert_called_once()
         self.assertEqual(_instance.read_record(self.directory / 'instance.json')['status'], 'failed')
+
+    def test_unsupported_or_mismatched_records_are_not_adopted(self):
+        state = self.prepare_destroy()
+        for changes in ({'schema': 2}, {'name': 'other'}):
+            with self.subTest(changes=changes):
+                _instance.write_record(self.directory / 'instance.json', dict(state, **changes))
+                with self.assertRaisesRegex(CLIError, 'Unsupported or mismatched.*Manual cleanup is required'):
+                    _lifecycle.destroy('demo')
+        self.client.call.assert_not_called()
+        _lifecycle.finalize.assert_not_called()
+
+    def test_corrupt_runtime_is_not_treated_as_shutdown(self):
+        self.prepare_destroy()
+        _instance.write_record(self.directory / 'runtime.json', {})
+        with self.assertRaisesRegex(CLIError, 'shutdown cannot be confirmed'):
+            _lifecycle.destroy('demo', no_logs=True)
+        self.client.call.assert_not_called()
+        _lifecycle.finalize.assert_not_called()
+
+    def test_destroy_recovers_identity_published_before_launcher_record(self):
+        """Recover a missing launcher identity from a valid runtime record."""
+        state = self.prepare_destroy()
+        state.pop('supervisor')
+        _instance.write_record(self.directory / 'instance.json', state)
+        with patch.object(_lifecycle, 'alive', return_value=False), \
+                patch.object(_lifecycle, '_stop_runtime'), patch.object(_lifecycle.logger, 'warning') as warning:
+            result = _lifecycle.destroy('demo')
+        warning.assert_called_once()
+        self.assertEqual(result['removal_outcome'], 'removed')
+        self.assertEqual(_instance.read_record(self.directory / 'instance.json')['supervisor']['pid'], 123)
+
+    def test_destroy_does_not_recover_invalid_runtime_identity(self):
+        """Leave state untouched if either recovered process identity is invalid."""
+        state = self.prepare_destroy()
+        state.pop('supervisor')
+        _instance.write_record(self.directory / 'instance.json', state)
+        runtime = _instance.read_record(self.directory / 'runtime.json')
+        for field in ('supervisor', 'openvmm'):
+            with self.subTest(field=field):
+                _instance.write_record(self.directory / 'runtime.json', dict(runtime, **{field: None}))
+                with patch.object(_lifecycle, '_shutdown_instance') as shutdown:
+                    with self.assertRaisesRegex(CLIError, 'Invalid process identity'):
+                        _lifecycle.destroy('demo')
+                    shutdown.assert_not_called()
+                self.assertEqual(_instance.read_record(self.directory / 'instance.json'), state)
+
+    def test_new_launches_generate_distinct_persistent_full_names(self):
+        with self.mock_launch_runtime(), \
+                patch.object(_lifecycle, 'new_name', side_effect=_instance.new_name), \
+                patch.object(_lifecycle, 'instance_path', side_effect=lambda name: self.base / name):
+            first = _lifecycle.launch(str(self.image))
+            second = _lifecycle.launch(str(self.image))
+        self.assertNotEqual(first['name'], second['name'])
+        for state in (first, second):
+            self.assertTrue(state['name'].startswith('enclave-'))
+            saved = _instance.read_record(self.base / state['name'] / 'instance.json')
+            self.assertEqual(saved['name'], state['name'])
+
+    def test_launch_failure_reports_name_even_when_rollback_persistence_fails(self):
+        with self.mock_launch_runtime() as runtime, \
+                patch.object(_lifecycle, '_rollback_launch', side_effect=OSError('Cannot save rollback')):
+            runtime.wait_runtime.side_effect = CLIError('Startup failed')
+            with self.assertRaisesRegex(CLIError, 'Launch failed for demo: Startup failed.*destroy --name demo'):
+                _lifecycle.launch(str(self.image))
+        self.assertTrue((self.directory / 'instance.json').exists())

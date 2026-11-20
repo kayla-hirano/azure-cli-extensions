@@ -196,13 +196,17 @@ Launch
 
 Create and resume a VM from the IGVM supplied with ``--igvm``. This can be create's
 output or your own compatible IGVM. Run as root on L1,
-choosing a new name for every launch. Set ``IGVM`` to your image::
+using an optional name prefix. Set ``IGVM`` to your image::
 
     export IGVM="$HOME/images/enclave.igvm"
     sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ENCLAVE_VENV/bin/az" enclave launch --name demo-1 \
+        "$ENCLAVE_VENV/bin/az" enclave launch --name-prefix demo \
         --igvm "$IGVM" --openvmm /usr/bin/openvmm
+
+Launch appends a fresh GUID to ``--name-prefix`` (default ``enclave``) and
+returns the immutable full name, for example
+``demo-01234567-89ab-4cde-8fab-0123456789ab``. All subsequent commands require the exact full name, never a prefix. Save the returned name as ``ENCLAVE_NAME``.
 
 Currently, only one Enclave-managed enclave may be active on an L1, even with
 different names. A second launch fails until the
@@ -219,18 +223,28 @@ The default startup timeout is 120 seconds; change it with ``--timeout``.
 Destroy
 ~~~~~~~
 
-Stop the VM and OpenVMM and clean up owned sockets, retaining the input IGVM,
-logs, and evidence. Run on the same L1 host::
+Stop the VM and OpenVMM, wait for log writers to exit, archive logs, and remove
+instance data. Run on the same L1 host::
 
     sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ENCLAVE_VENV/bin/az" enclave destroy --name demo-1
+        "$ENCLAVE_VENV/bin/az" enclave destroy --name "$ENCLAVE_NAME"
+
+By default only ``com1.log``, ``openvmm.log`` and ``supervisor.log`` are copied
+to ``/var/log/enclave/<full-name>/``.
+
+Use ``--no-logs`` to explicitly discard logs as well::
+
+    sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
+        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
+        "$ENCLAVE_VENV/bin/az" enclave destroy --name "$ENCLAVE_NAME" --no-logs
 
 The default timeout is 30 seconds; change it with ``--timeout``. Cleanup has
 additional bounded grace periods. Failed destruction is not confirmation
-that the VM stopped; inspect the logs and retry. Repeating destroy is supported.
+that the VM stopped; inspect the reported status, error and paths.
+
 After the instance's OpenVMM and supervisor exit, a new instance can be launched
-with a new name. The host-wide guard remains held while either process lives.
+with a fresh generated name. The host-wide guard remains held while either process lives.
 
 Always destroy test instances
 before running ``deactivate``: leaving the shell does not stop them, and a host
@@ -294,8 +308,12 @@ enter these directories; use sudo to read the records directly without
 changing directories::
 
     sudo "$ENCLAVE_VENV/bin/python" -m json.tool \
-        /var/lib/enclave/instances/demo-1/instance.json
+        "/var/lib/enclave/instances/$ENCLAVE_NAME/instance.json"
 
+``evidence.report`` is the hex-encoded 1184-byte SNP report. Enclave checks the
+report's shape, **not** its signature, measurement, challenge binding, or
+certificate chain. Successful launch is not verified attestation and
+performs no key release.
 
 The same directory retains ``instance.json``, ``openvmm.log``,
 ``supervisor.log``, and ``com1.log`` for diagnosis, including after destroy.
@@ -307,7 +325,7 @@ been removed. Choose a destination that does not already exist::
     sudo cp -a -- /var/lib/enclave/instances/demo-1 "$HOME/demo-1-results"
     sudo chown -R -- "$(id -u):$(id -g)" "$HOME/demo-1-results"
     cd "$HOME/demo-1-results"
-    python -m json.tool instance.json
+    python -m json.tool response.json
 
 Keep the original Enclave directory root-owned and private; do not change its
 permissions to gain access. The user-owned copy is a results archive, not a
@@ -384,5 +402,6 @@ prepared image::
 
 Launch the image, then destroy the instance when finished::
 
-    sudo az enclave launch --name test-1 --igvm "$HOME/enclave-artifacts/enclave.igvm"
-    sudo az enclave destroy --name test-1
+    sudo az enclave launch --name-prefix test --igvm "$HOME/enclave-artifacts/enclave.igvm"
+    # Set ENCLAVE_NAME to the full name returned above.
+    sudo az enclave destroy --name "$ENCLAVE_NAME"

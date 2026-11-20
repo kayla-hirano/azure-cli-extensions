@@ -36,13 +36,18 @@ def load_arguments(self, _):
                               'Failures retain them automatically; the retained path is reported.')
     for command in ('enclave launch', 'enclave destroy'):
         with self.argument_context(command) as context:
-            context.argument('name', options_list=['--name', '-n'], required=True,
-                             help='Local instance name: 1-32 letters, digits, underscores or hyphens, '
-                                  'starting with a letter or digit.')
             context.argument('timeout', type=float, help='Operation timeout in seconds.')
     with self.argument_context('enclave launch') as context:
+        context.argument('name_prefix',
+                         help='Optional name prefix (default: enclave): 1-24 ASCII letters, digits, underscores '
+                              'or hyphens, starting with a letter or digit. Launch appends a unique GUID.')
         context.argument('igvm', required=True, help='Path to an existing compatible SNP enclave image (IGVM).')
         context.argument('openvmm', help='OpenVMM executable path or command name.')
         context.argument('allow_untested_runtime', action='store_true',
                          help='Skip the supported runtime package check. For testing only; '
                               'you must ensure the runtime is compatible.')
+    with self.argument_context('enclave destroy') as context:
+        context.argument('name', options_list=['--name', '-n'], required=True,
+                         help='Full immutable <prefix>-<guid> name returned by launch. Prefixes are not resolved.')
+        context.argument('no_logs', action='store_true',
+                         help='Discard this run\'s unarchived logs instead of retaining them.')
