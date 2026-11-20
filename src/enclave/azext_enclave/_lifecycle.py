@@ -7,11 +7,13 @@
 
 import hashlib
 import os
+import re
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional, Tuple
 
 import grpc
 from knack.log import get_logger
@@ -19,14 +21,11 @@ from knack.util import CLIError
 
 from . import _instance
 from ._instance import (alive, check_private, cleanup_sockets, host_lock, identity,
-                        instance_lock, instance_path, read_record, require_host, stop_owned,
-                        write_record)
-from ._isolation import load_isolation
                         instance_lock, instance_path, new_name, read_record, require_host, stop_owned,
                         sync_directory, write_record)
 from ._cleanup import (LOG_NAMES, archive_path, finalize, finalization_error, read_private_record,
                        staging_path)
-from ._isolation import IsolationType, load_isolation
+from ._isolation import load_isolation
 from ._rpc import VmClient, create_request, validate_launch_configuration
 from ._runtime import resolve_runtime
 from .rpc import vmservice_pb2 as vm
@@ -47,98 +46,7 @@ def _instance_info(directory: Path) -> dict:
             'com1': str(directory / 'com1.log'),
         },
         'instance_file': str(directory / 'instance.json'),
-        'response_file': str(directory / 'response.json'),
     }
-
-
-def read_line(stream: Union[BufferedReader, BufferedRWPair], connection: Optional[socket.socket] = None,
-              deadline: Optional[float] = None) -> bytes:
-    """Read a buffered relay line in chunks without consuming bytes from the next line."""
-    line = bytearray()
-    while len(line) <= MAX_LINE_BYTES:
-        if connection is not None and deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise CLIError('Guest response timed out.')
-            connection.settimeout(min(5, remaining))
-        available = stream.peek(1)
-        if not available:
-            break
-        newline = available.find(b'\n')
-        size = len(available) if newline < 0 else newline + 1
-        chunk = stream.read(min(size, MAX_LINE_BYTES + 1 - len(line)))
-        line.extend(chunk)
-        if chunk.endswith(b'\n'):
-            break
-    if not line:
-        # The relay can close before the guest listener is ready; let the readiness loop retry.
-        raise ConnectionError('Guest relay closed before returning a response.')
-    if not line.endswith(b'\n') or len(line) > MAX_LINE_BYTES:
-        raise CLIError('Guest relay returned an oversized or unterminated response.')
-    return bytes(line)
-
-
-def _validate_snp_response(value: object) -> None:
-    """Check SNP evidence type, length, and hexadecimal encoding without verifying attestation."""
-    evidence = value.get('evidence', {}) if isinstance(value, dict) else {}
-    report = (evidence.get('report')
-              if isinstance(evidence, dict) and evidence.get('tee') == IsolationType.SNP else None)
-    if not isinstance(report, str) or len(report) != 2368:
-        raise CLIError('Guest did not return a 1184-byte SNP report; mock evidence is rejected.')
-    try:
-        bytes.fromhex(report)
-    except ValueError as error:
-        raise CLIError('Guest SNP report is not valid hexadecimal.') from error
-
-
-def _guest_response_validator(isolation_type: IsolationType) -> Callable[[object], None]:
-    """Select an implemented evidence-shape validator before opening the guest connection."""
-    if isolation_type == IsolationType.SNP:
-        return _validate_snp_response
-    raise CLIError('Guest readiness is not implemented for isolation type: ' + isolation_type)
-
-
-def probe_guest(directory: Path, deadline: float, isolation_type: IsolationType = IsolationType.SNP) -> None:
-    """Retry the shared guest exchange and retain evidence after type-specific shape checks."""
-    validate_response = _guest_response_validator(isolation_type)
-    last_error = 'Guest relay has not become available.'
-    challenge = secrets.token_hex(32)
-    while time.monotonic() < deadline:
-        runtime = read_record(directory / 'runtime.json')
-        if not alive(runtime['openvmm']) or not alive(runtime['supervisor']):
-            raise CLIError('OpenVMM or its supervisor exited; inspect the instance logs.')
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(min(5, max(0.01, deadline - time.monotonic())))
-                connection.connect(str(directory / 'vsock.sock'))
-                with connection.makefile('rwb') as stream:
-                    stream.write('CONNECT {}\n'.format(GUEST_VSOCK_PORT).encode('ascii'))
-                    stream.flush()
-                    if not read_line(stream, connection, deadline).startswith(b'OK '):
-                        raise CLIError('OpenVMM rejected the guest relay connection.')
-                    stream.write(json.dumps({
-                        'challenge': challenge, 'payload': 'hello world',
-                    }).encode('utf-8') + b'\n')
-                    stream.flush()
-                    response = read_line(stream, connection, deadline)
-            value = json.loads(response)
-            validate_response(value)
-        except OSError as error:
-            last_error = str(error)
-            logger.debug('Waiting for enclave application: %s', error)
-            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
-        except (ValueError, TypeError) as error:
-            raise CLIError('Invalid guest JSON response: {}'.format(error)) from error
-        else:
-            descriptor = os.open(str(directory / 'response.json'),
-                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, 'wb') as output:
-                output.write(response)
-                output.flush()
-                os.fsync(output.fileno())
-            sync_directory(directory)
-            return
-    raise CLIError('Guest readiness timed out: {}'.format(last_error))
 
 
 def _wait_runtime(directory: Path, supervisor: dict, deadline: float) -> dict:

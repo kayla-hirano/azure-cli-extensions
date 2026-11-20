@@ -266,9 +266,8 @@ These are three separate local Unix-socket connections:
 
 * ``rpc.sock`` carries management RPCs, not application requests. Closing
   the CLI's gRPC channel does not stop OpenVMM.
-* ``vsock.sock`` is OpenVMM's guest relay. Launch sends ``CONNECT 4050``,
-  waits for ``OK``, then exchanges a newline-delimited JSON request and
-  response with the enclave application.
+* ``vsock.sock`` is OpenVMM's guest relay for a separate client to communicate
+  with the guest application.
 * ``serial.sock`` is the supervisor's listener for OpenVMM's COM1 connection.
   The supervisor writes guest serial output to ``com1.log`` and directs
   OpenVMM stdout/stderr to ``openvmm.log``. Its own output goes to
@@ -310,26 +309,10 @@ changing directories::
     sudo "$ENCLAVE_VENV/bin/python" -m json.tool \
         "/var/lib/enclave/instances/$ENCLAVE_NAME/instance.json"
 
-``evidence.report`` is the hex-encoded 1184-byte SNP report. Enclave checks the
-report's shape, **not** its signature, measurement, challenge binding, or
-certificate chain. Successful launch is not verified attestation and
-performs no key release.
-
-The same directory retains ``instance.json``, ``openvmm.log``,
-``supervisor.log``, and ``com1.log`` for diagnosis, including after destroy.
-
-To browse all results without sudo, copy the instance directory after a
-successful destroy, when logs have stopped changing and runtime sockets have
-been removed. Choose a destination that does not already exist::
-
-    sudo cp -a -- /var/lib/enclave/instances/demo-1 "$HOME/demo-1-results"
-    sudo chown -R -- "$(id -u):$(id -g)" "$HOME/demo-1-results"
-    cd "$HOME/demo-1-results"
-    python -m json.tool response.json
-
-Keep the original Enclave directory root-owned and private; do not change its
-permissions to gain access. The user-owned copy is a results archive, not a
-relocatable or resumable Enclave instance.
+Inspect instance records before destruction. Successful destroy removes the
+instance directory and archives only the three runtime logs under
+``/var/log/enclave/<full-name>/``, unless ``--no-logs`` was selected.
+Launch does not save a guest response or verify attestation.
 
 Testing using a wheel (.whl)
 ---------------------------

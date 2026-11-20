@@ -784,6 +784,50 @@ class ImageBuilderTest(unittest.TestCase):
         self.assertEqual(raised.exception.workspace.parent, self.inputs.workspace)
         self.run.assert_not_called()
 
+    def test_app_command_line_through_cli_and_packaging(self) -> None:
+        """Package the exact caller command while preserving the default startup script."""
+        command = '/bin/enclave_app worker --label "two words" && echo done'
+        original = builder.DEFAULT_INIT_SCRIPT.read_bytes()
+        expected = original.replace(
+            b'exec /bin/enclave_app serve-vsock 4050\n', b'exec ' + command.encode('utf-8') + b'\n')
+
+        def inspect(work: Path) -> None:
+            self.assertEqual((work / 'rootfs' / 'init').read_bytes(), expected)
+
+        inspection = self.inspect_stage('generate-igvm', inspect)
+        cli = create_cli(str(self.inputs.root / 'cli-config'))
+        output = io.StringIO()
+        code = cli.invoke(
+            ['enclave', 'create', '--application', str(self.inputs.application),
+             '--dependency-bundle', str(self.inputs.bundle), '--workspace', str(self.inputs.workspace),
+             '--output-file', str(self.inputs.output), '--app-cmd-line', command, '--output', 'json'],
+            out_file=output)
+        self.assertEqual(code, 0, str(cli.result.error))
+        inspection.assert_called_once()
+        self.assertEqual(json.loads(output.getvalue())['igvm'], str(self.inputs.output))
+        self.assertEqual(builder.DEFAULT_INIT_SCRIPT.read_bytes(), original)
+        self.assertEqual(list(self.inputs.workspace.iterdir()), [])
+
+    def test_app_command_line_rejects_custom_init_even_for_default_command(self) -> None:
+        """Reject conflicting startup overrides before creating build files."""
+        for command in ('/bin/enclave_app serve-vsock 4050', '/bin/enclave_app worker'):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(builder.IgvmBuildError, 'cannot be combined with --init-script'):
+                    self.inputs.build(app_cmd_line=command)
+        self.run.assert_not_called()
+        self.assertFalse(self.inputs.workspace.exists())
+        self.assertFalse(self.inputs.output.exists())
+
+    def test_app_command_line_rejects_empty_or_multiline_commands(self) -> None:
+        """Reject invalid startup commands without executing build tools."""
+        for command in ('', ' ', 'worker\0arg', 'worker\rarg', 'worker\narg'):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(builder.IgvmBuildError, '--app-cmd-line must be a nonempty string'):
+                    self.inputs.build(init_script=None, app_cmd_line=command)
+        self.run.assert_not_called()
+        self.assertFalse(self.inputs.workspace.exists())
+        self.assertFalse(self.inputs.output.exists())
+
     def test_composed_rootfs_and_normalized_metadata(self) -> None:
         """Compose the requested application and init script while removing legacy files and normalizing metadata."""
         def inspect(work):

@@ -156,6 +156,10 @@ class LifecycleTest(LinuxFilesystemTest):
                 for name in ('openvmm', 'supervisor', 'com1')
             })
             self.assertEqual(result['instance_file'], str(self.directory / 'instance.json'))
+            self.assertNotIn('response_file', result)
+            self.assertNotIn('attestation_verified', result)
+            self.assertFalse((self.directory / 'response.json').exists())
+            self.assertEqual(result['expected_logs'], list(_lifecycle.LOG_NAMES))
             self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                              ['CreateVM', 'ResumeVM'])
             self.client.ready.assert_called_once()
