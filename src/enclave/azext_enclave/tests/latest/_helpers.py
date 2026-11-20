@@ -50,3 +50,10 @@ class LinuxFilesystemTest(unittest.TestCase):
             patcher = patch('socket.AF_UNIX', 1, create=True)
             patcher.start()
             self.addCleanup(patcher.stop)
+            for name in ('_instance', '_cleanup', '_lifecycle'):
+                patcher = patch('azext_enclave.' + name + '.sync_directory')
+                patcher.start()
+                self.addCleanup(patcher.stop)
+            patcher = patch('azext_enclave._instance.os.O_NONBLOCK', 0, create=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)

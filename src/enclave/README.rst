@@ -130,11 +130,12 @@ Validate Azure Linux 3.0 and ``/dev/mshv``, install
 Create
 ~~~~~~
 
-Build an IGVM using the dependency archive, enclave application, and init
-script packaged with the extension. Run as your normal user on Linux L1
-with GNU cpio and gzip installed::
+Build an IGVM using the dependency archive and init
+script packaged with the extension. The enclave application is not included in dependency bundle.
+Run as your normal user on Linux L1with GNU cpio and gzip installed::
 
     "$ENCLAVE_VENV/bin/az" enclave create \
+        --application "$HOME/path/to/my-app" \
         --output-file "$HOME/images/enclave.igvm"
 
 Build intermediates use a unique private temporary directory, honoring
@@ -152,8 +153,6 @@ The packaged inputs are under ``azext_enclave/dependencies/``:
 * ``dependencies.tar.gz``: the trusted ``measured-pcie-v1`` bundle containing
   the kernel, base initrd, SNP boot shim, ``igvmfilegen``, guest manifest,
   and artifact hashes.
-* ``enclave_app``: the static x86-64 application installed as
-  ``/bin/enclave_app``.
 * ``initramfs/enclave-init``: the default guest startup script, which starts
   the application on guest vsock port 4050.
 
@@ -176,13 +175,17 @@ or existing bundle directory instead of the packaged archive.
 An archive must contain ``dependency-manifest.v1.json`` and its referenced
 artifacts at the root or inside one top-level directory.
 
-Use ``--init-script`` to override guest startup. The supplied script must
-have a shebang and LF line endings and start the application appropriately.
-Launch expects a compatible application response on guest vsock port 4050.
+Use ``--app-cmd-line`` to replace the command after the default startup script's
+final ``exec``, preserving mounts and other initialization.
+The default command is ``/bin/enclave_app serve-vsock 4050``.
 
-Use ``--application`` to supply your own static x86-64 ELF binary instead
-of the packaged application. It is installed as ``/bin/enclave_app`` in the
-guest.
+Use ``--init-script`` for a complete guest startup replacement. The supplied
+script must have a shebang and LF line endings and start the application
+appropriately. It cannot be combined with ``--app-cmd-line``, even when the
+command matches the default. Neither option changes the original init script.
+
+The required ``--application`` supplies a prebuilt static x86-64 ELF binary.
+It is installed as ``/bin/enclave_app`` in the guest.
 
 Optional ``--signing-key`` requires OpenSSL and an unencrypted PEM ECDSA
 P-384 key. Signing failure never publishes an unsigned fallback. Adding a
@@ -191,38 +194,57 @@ signed SNP ID block does not change the expected launch measurement.
 Launch
 ~~~~~~
 
-Create and resume a VM from the IGVM supplied with ``--igvm``, then wait for
-a guest response containing an SNP-shaped report. This can be create's
+Create and resume a VM from the IGVM supplied with ``--igvm``. This can be create's
 output or your own compatible IGVM. Run as root on L1,
-choosing a new name for every launch. Set ``IGVM`` to your image::
+using an optional name prefix. Set ``IGVM`` to your image::
 
     export IGVM="$HOME/images/enclave.igvm"
     sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ENCLAVE_VENV/bin/az" enclave launch --name demo-1 \
+        "$ENCLAVE_VENV/bin/az" enclave launch --name-prefix demo \
         --igvm "$IGVM" --openvmm /usr/bin/openvmm
+
+Launch appends a fresh GUID to ``--name-prefix`` (default ``enclave``) and
+returns the immutable full name, for example
+``demo-01234567-89ab-4cde-8fab-0123456789ab``. All subsequent commands require the exact full name, never a prefix. Save the returned name as ``ENCLAVE_NAME``.
 
 Currently, only one Enclave-managed enclave may be active on an L1, even with
 different names. A second launch fails until the
 existing runtime stops. OpenVMM starts on demand, not during setup.
 
-The default timeout is 120 seconds; change it with ``--timeout``.
+Launch returns after OpenVMM acknowledges resuming the VM. A ``running`` status
+means guest execution was started, not that the guest has finished booting or
+its application is reachable. Launch does not connect to the guest, collect
+attestation reports, or perform heartbeat checks. Check guest readiness and
+attestation separately.
+
+The default startup timeout is 120 seconds; change it with ``--timeout``.
 
 Destroy
 ~~~~~~~
 
-Stop the VM and OpenVMM and clean up owned sockets, retaining the input IGVM,
-logs, and evidence. Run on the same L1 host::
+Stop the VM and OpenVMM, wait for log writers to exit, archive logs, and remove
+instance data. Run on the same L1 host::
 
     sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
         AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
-        "$ENCLAVE_VENV/bin/az" enclave destroy --name demo-1
+        "$ENCLAVE_VENV/bin/az" enclave destroy --name "$ENCLAVE_NAME"
+
+By default only ``com1.log``, ``openvmm.log`` and ``supervisor.log`` are copied
+to ``/var/log/enclave/<full-name>/``.
+
+Use ``--no-logs`` to explicitly discard logs as well::
+
+    sudo env AZURE_CONFIG_DIR=/root/.azure-enclave \
+        AZURE_EXTENSION_DIR="$AZURE_EXTENSION_DIR" \
+        "$ENCLAVE_VENV/bin/az" enclave destroy --name "$ENCLAVE_NAME" --no-logs
 
 The default timeout is 30 seconds; change it with ``--timeout``. Cleanup has
 additional bounded grace periods. Failed destruction is not confirmation
-that the VM stopped; inspect the logs and retry. Repeating destroy is supported.
+that the VM stopped; inspect the reported status, error and paths.
+
 After the instance's OpenVMM and supervisor exit, a new instance can be launched
-with a new name. The host-wide guard remains held while either process lives.
+with a fresh generated name. The host-wide guard remains held while either process lives.
 
 Always destroy test instances
 before running ``deactivate``: leaving the shell does not stop them, and a host
@@ -235,7 +257,7 @@ The launching CLI starts a detached Python supervisor, which starts OpenVMM
 as its child. Both outlive the CLI command::
 
     az enclave launch / destroy -- gRPC via rpc.sock --> OpenVMM
-    az enclave launch ---------- CONNECT via vsock.sock --> guest app, port 4050
+    separate guest client ----- CONNECT via vsock.sock --> guest app, port 4050
     supervisor <------------ COM1 via serial.sock ---- OpenVMM
         |
         +-- owns and reaps the OpenVMM child
@@ -244,9 +266,8 @@ These are three separate local Unix-socket connections:
 
 * ``rpc.sock`` carries management RPCs, not application requests. Closing
   the CLI's gRPC channel does not stop OpenVMM.
-* ``vsock.sock`` is OpenVMM's guest relay. Launch sends ``CONNECT 4050``,
-  waits for ``OK``, then exchanges a newline-delimited JSON request and
-  response with the enclave application.
+* ``vsock.sock`` is OpenVMM's guest relay for a separate client to communicate
+  with the guest application.
 * ``serial.sock`` is the supervisor's listener for OpenVMM's COM1 connection.
   The supervisor writes guest serial output to ``com1.log`` and directs
   OpenVMM stdout/stderr to ``openvmm.log``. Its own output goes to
@@ -277,38 +298,21 @@ restore ownership of that dedicated directory once::
 
     sudo chown -R -- "$(id -u):$(id -g)" "$ENCLAVE_VENV/azure-config"
 
-View launch evidence
+View launch records
 --------------------
 
-After successful guest readiness, launch saves the JSON response under the
-instance directory. Enclave requires root-owned state directories with mode
+Launch saves instance records and logs. Enclave requires root-owned state directories with mode
 ``0700`` under the fixed root. Your normal user cannot
-enter these directories; use sudo to read the evidence directly without
+enter these directories; use sudo to read the records directly without
 changing directories::
 
     sudo "$ENCLAVE_VENV/bin/python" -m json.tool \
-        /var/lib/enclave/instances/demo-1/response.json
+        "/var/lib/enclave/instances/$ENCLAVE_NAME/instance.json"
 
-``evidence.report`` is the hex-encoded 1184-byte SNP report. Enclave checks the
-report's shape, **not** its signature, measurement, challenge binding, or
-certificate chain. Successful launch is not verified attestation and
-performs no key release.
-
-The same directory retains ``instance.json``, ``openvmm.log``,
-``supervisor.log``, and ``com1.log`` for diagnosis, including after destroy.
-
-To browse all results without sudo, copy the instance directory after a
-successful destroy, when logs have stopped changing and runtime sockets have
-been removed. Choose a destination that does not already exist::
-
-    sudo cp -a -- /var/lib/enclave/instances/demo-1 "$HOME/demo-1-results"
-    sudo chown -R -- "$(id -u):$(id -g)" "$HOME/demo-1-results"
-    cd "$HOME/demo-1-results"
-    python -m json.tool response.json
-
-Keep the original Enclave directory root-owned and private; do not change its
-permissions to gain access. The user-owned copy is a results archive, not a
-relocatable or resumable Enclave instance.
+Inspect instance records before destruction. Successful destroy removes the
+instance directory and archives only the three runtime logs under
+``/var/log/enclave/<full-name>/``, unless ``--no-logs`` was selected.
+Launch does not save a guest response or verify attestation.
 
 Testing using a wheel (.whl)
 ---------------------------
@@ -375,10 +379,12 @@ Create an image as your normal user, or skip this step if you copied a
 prepared image::
 
     az enclave create \
+        --application "$HOME/path/to/my-app" \
         --workspace "$HOME/enclave-build" \
         --output-file "$HOME/enclave-artifacts/enclave.igvm"
 
 Launch the image, then destroy the instance when finished::
 
-    sudo az enclave launch --name test-1 --igvm "$HOME/enclave-artifacts/enclave.igvm"
-    sudo az enclave destroy --name test-1
+    sudo az enclave launch --name-prefix test --igvm "$HOME/enclave-artifacts/enclave.igvm"
+    # Set ENCLAVE_NAME to the full name returned above.
+    sudo az enclave destroy --name "$ENCLAVE_NAME"

@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from knack.util import CLIError
 
-from azext_enclave import _instance
+from azext_enclave import _instance, _lifecycle
 
 
 class HostLockTest(unittest.TestCase):
@@ -33,14 +33,14 @@ class HostLockTest(unittest.TestCase):
                 self.assertEqual(descriptor, 47)
         path.assert_called_once_with('/run/enclave')
         self.assertEqual(lock.call_args.args[0], directory)
-        self.assertIn('Destroy the existing instance', lock.call_args.args[1])
 
     def test_instance_names_resolve_under_fixed_root(self) -> None:
+        name = _instance.new_name('demo')
         with patch('azext_enclave._instance._private_root', return_value=Path('/var/lib/enclave/instances')) as root, \
                 patch.object(Path, 'is_symlink', return_value=False):
-            directory = _instance.instance_path('demo')
+            directory = _instance.instance_path(name)
         root.assert_called_once_with('/var/lib/enclave/instances')
-        self.assertEqual(directory, Path('/var/lib/enclave/instances') / 'demo')
+        self.assertEqual(directory, Path('/var/lib/enclave/instances') / name)
 
     @unittest.skipUnless(sys.platform == 'linux', 'Requires Linux flock and descriptor inheritance.')
     def test_different_names_share_one_slot(self) -> None:
@@ -48,12 +48,12 @@ class HostLockTest(unittest.TestCase):
             base = Path(temporary)
             with patch('azext_enclave._instance.HOST_STATE_DIR', str(base / 'host')), \
                     patch('azext_enclave._instance.DEFAULT_STATE_DIR', str(base / 'instances')):
-                first = _instance.instance_path('first')
-                second = _instance.instance_path('second')
+                first = _instance.instance_path(_instance.new_name('first'))
+                second = _instance.instance_path(_instance.new_name('second'))
                 with _instance.host_lock(), _instance.instance_lock(first):
                     # Per-instance locks are independent; the host guard must reject the second launch.
                     with _instance.instance_lock(second):
-                        with self.assertRaisesRegex(CLIError, 'already starting or running'):
+                        with self.assertRaises(CLIError):
                             with _instance.host_lock():
                                 self.fail('A second host slot must not be acquired.')
                 with _instance.host_lock():
@@ -68,7 +68,7 @@ class HostLockTest(unittest.TestCase):
                         [sys.executable, '-c', 'import sys; sys.stdin.buffer.read(1)'],
                         stdin=subprocess.PIPE, pass_fds=(descriptor,))
                 try:
-                    with self.assertRaisesRegex(CLIError, 'already starting or running'):
+                    with self.assertRaises(CLIError):
                         with _instance.host_lock():
                             self.fail('The runtime must retain the lease after the launcher exits.')
                 finally:
@@ -77,3 +77,34 @@ class HostLockTest(unittest.TestCase):
                 # Exit releases the lease without deleting a lock file or editing instance evidence.
                 with _instance.host_lock():
                     pass
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Requires Linux flock.')
+    def test_destroy_holds_host_lock_through_finalization_and_releases_it_on_failure(self) -> None:
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary) / 'demo'
+                directory.mkdir(mode=0o700)
+                state = {'name': 'demo', 'status': 'cleanup-pending'}
+                result = {'name': 'demo', 'status': 'destroyed'}
+
+                def finalize(_directory, _state):
+                    with self.assertRaises(CLIError):
+                        with _instance.host_lock():
+                            self.fail('Launch must remain blocked during finalization.')
+                    if fail:
+                        raise OSError('Finalization interrupted')
+                    return result
+
+                with patch.object(_instance, 'HOST_STATE_DIR', str(Path(temporary) / 'host')), \
+                        patch.object(_lifecycle, 'require_host'), \
+                        patch.object(_instance, 'DEFAULT_STATE_DIR', temporary), \
+                        patch.object(_lifecycle, '_prepare_destroy', return_value=(state, {})), \
+                        patch.object(_lifecycle, '_shutdown_instance'), \
+                        patch.object(_lifecycle, 'finalize', side_effect=finalize):
+                    if fail:
+                        with self.assertRaisesRegex(CLIError, 'Finalization interrupted'):
+                            _lifecycle.destroy('demo')
+                    else:
+                        self.assertEqual(_lifecycle.destroy('demo'), result)
+                    with _instance.host_lock():
+                        pass

@@ -13,7 +13,7 @@ import grpc
 from google.protobuf import empty_pb2
 from knack.util import CLIError
 
-from ._isolation import IsolationConfiguration, IsolationType, load_isolation, validate_configuration
+from ._isolation import IsolationConfiguration, IsolationType, load_isolation
 from .rpc import vmservice_pb2 as vm
 
 
@@ -25,10 +25,8 @@ def _boot_personality(boot_mode: str) -> int:
 
 
 def validate_launch_configuration(configuration: IsolationConfiguration) -> None:
-    """Require implemented RPC isolation and boot mappings before starting a runtime."""
-    if configuration.isolation_type == IsolationType.SNP:
-        validate_configuration(configuration)
-    else:
+    """Check RPC isolation and boot support for validated configuration."""
+    if configuration.isolation_type != IsolationType.SNP:
         raise ValueError('RPC launch is not implemented for isolation type: ' + configuration.isolation_type)
     _boot_personality(configuration.supported_configuration.boot_mode)
 

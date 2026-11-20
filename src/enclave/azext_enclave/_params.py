@@ -14,9 +14,13 @@ def load_arguments(self, _):
         context.argument('dependency_bundle', required=False,
                          help='Path to a trusted compatible dependency bundle (tar/tar.gz or directory). '
                               'Defaults to the packaged bundle.')
-        context.argument('application', required=False,
-                         help='Path to a prebuilt static x86-64 ELF application. Defaults to the packaged application. '
-                              'Use --init-script to customize how it starts.')
+        context.argument('application', required=True,
+                         help='Path to a prebuilt static x86-64 ELF application. '
+                              'Use --app-cmd-line or --init-script to customize how it starts.')
+        context.argument('app_cmd_line', required=False,
+                         help='Guest shell command following exec in the default startup script. '
+                              'Defaults to /bin/enclave_app serve-vsock 4050. '
+                              'Cannot be combined with --init-script; shell content is not validated.')
         context.argument('init_script', required=False,
                          help='Path to a guest startup script with a shebang and LF line endings. '
                               'Replaces the default script; the application is installed at /bin/enclave_app.')
@@ -32,13 +36,18 @@ def load_arguments(self, _):
                               'Failures retain them automatically; the retained path is reported.')
     for command in ('enclave launch', 'enclave destroy'):
         with self.argument_context(command) as context:
-            context.argument('name', options_list=['--name', '-n'], required=True,
-                             help='Local instance name: 1-32 letters, digits, underscores or hyphens, '
-                                  'starting with a letter or digit.')
             context.argument('timeout', type=float, help='Operation timeout in seconds.')
     with self.argument_context('enclave launch') as context:
+        context.argument('name_prefix',
+                         help='Optional name prefix (default: enclave): 1-24 ASCII letters, digits, underscores '
+                              'or hyphens, starting with a letter or digit. Launch appends a unique GUID.')
         context.argument('igvm', required=True, help='Path to an existing compatible SNP enclave image (IGVM).')
         context.argument('openvmm', help='OpenVMM executable path or command name.')
         context.argument('allow_untested_runtime', action='store_true',
                          help='Skip the supported runtime package check. For testing only; '
                               'you must ensure the runtime is compatible.')
+    with self.argument_context('enclave destroy') as context:
+        context.argument('name', options_list=['--name', '-n'], required=True,
+                         help='Full immutable <prefix>-<guid> name returned by launch. Prefixes are not resolved.')
+        context.argument('no_logs', action='store_true',
+                         help='Discard this run\'s unarchived logs instead of retaining them.')

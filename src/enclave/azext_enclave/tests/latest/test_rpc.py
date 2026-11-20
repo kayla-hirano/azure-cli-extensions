@@ -48,15 +48,14 @@ class RpcContractTest(unittest.TestCase):
         self.assertEqual(config.isolation_config.WhichOneof('isolation_type'), 'snp')
 
     def test_request_rejects_unimplemented_isolation_and_boot_modes(self) -> None:
-        """Reject isolation, backend, and boot combinations without an implemented RPC launch path."""
+        """Reject isolation and boot modes without an implemented RPC launch path."""
         configuration = load_isolation()
         for unsupported in (
                 replace(configuration, isolation_type='tdx'),
-                replace(configuration, runtime=replace(configuration.runtime, backend='kvm')),
                 replace(configuration, supported_configuration=replace(
                     configuration.supported_configuration, boot_mode='uefi'))):
             with self.subTest(configuration=unsupported), self.assertRaisesRegex(
-                    ValueError, 'RPC launch is not implemented|Unsupported runtime backend|only SNP'):
+                    ValueError, 'RPC launch is not implemented|RPC boot mode is not implemented'):
                 _rpc.create_request(Path('image'), Path('instance'), 'demo', unsupported)
 
     def test_unmapped_boot_mode_is_rejected_by_preflight_and_request_mapping(self) -> None:
@@ -64,9 +63,8 @@ class RpcContractTest(unittest.TestCase):
         configuration = load_isolation()
         configuration = replace(configuration, supported_configuration=replace(
             configuration.supported_configuration, boot_mode='uefi'))
-        with patch.object(_rpc, 'validate_configuration'):
-            with self.assertRaisesRegex(ValueError, 'RPC boot mode is not implemented: uefi'):
-                _rpc.validate_launch_configuration(configuration)
+        with self.assertRaisesRegex(ValueError, 'RPC boot mode is not implemented: uefi'):
+            _rpc.validate_launch_configuration(configuration)
         with patch.object(_rpc, 'validate_launch_configuration'):
             with self.assertRaisesRegex(ValueError, 'RPC boot mode is not implemented: uefi'):
                 _rpc.create_request(Path('image'), Path('instance'), 'demo', configuration)

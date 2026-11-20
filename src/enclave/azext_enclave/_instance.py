@@ -14,6 +14,7 @@ import signal
 import stat
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator, Optional
@@ -22,6 +23,15 @@ from knack.util import CLIError
 
 DEFAULT_STATE_DIR = '/var/lib/enclave/instances'
 HOST_STATE_DIR = '/run/enclave'
+NAME_PREFIX_PATTERN = r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,23}'
+
+
+def new_name(prefix: str) -> str:
+    """Validate a launch prefix before generating its immutable lifecycle name."""
+    if not isinstance(prefix, str) or not re.fullmatch(NAME_PREFIX_PATTERN, prefix):
+        raise CLIError('--name-prefix must be 1-24 ASCII letters, digits, underscores or hyphens, '
+                       'starting with a letter or digit.')
+    return '{}-{}'.format(prefix, uuid.uuid4())
 
 
 def require_host(timeout: float) -> None:
@@ -35,9 +45,7 @@ def require_host(timeout: float) -> None:
 
 
 def instance_path(name: str) -> Path:
-    """Validate the instance name and private state root before constructing socket paths."""
-    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}', name):
-        raise CLIError('--name must be 1-32 letters, digits, underscores or hyphens.')
+    """Construct a generated launch name's path under the private state root."""
     base = _private_root(DEFAULT_STATE_DIR)
     directory = base / name
     if directory.is_symlink():
@@ -45,16 +53,31 @@ def instance_path(name: str) -> Path:
     return directory
 
 
-def _private_root(root: str) -> Path:
-    """Prepare a CLI-owned state root without traversing symlinks."""
+def _private_root(root: str, create: bool = True) -> Path:
+    """Validate a private directory path and optionally create it, flushing new directory entries to storage."""
     base = Path(root).absolute()
     # Never resolve through a symlink into another instance or an untrusted state directory.
     for path in list(reversed(base.parents)) + [base]:
         if path.is_symlink():
             raise CLIError('State directory must not contain symlinks: {}'.format(path))
-    base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    check_private(base)
+    if create:
+        missing = [path for path in [base] + list(base.parents) if not path.exists()]
+        for path in reversed(missing):
+            path.mkdir(mode=0o700, exist_ok=True)
+        for path in missing:
+            sync_directory(path.parent)
+    if base.exists():
+        check_private(base)
     return base
+
+
+def sync_directory(path: Path) -> None:
+    """Flush file creation, rename and deletion changes in a directory to storage."""
+    descriptor = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def check_private(path: Path) -> None:
@@ -104,6 +127,7 @@ def write_record(path: Path, value: dict) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(str(temporary), str(path))
+    sync_directory(path.parent)
 
 
 def read_record(path: Path) -> dict:

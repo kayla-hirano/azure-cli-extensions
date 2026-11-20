@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,11 +22,19 @@ from ._helpers import LinuxFilesystemTest
 class InstanceTest(LinuxFilesystemTest):
     """Exercise record safety, process identity, and host prerequisites."""
 
-    def test_name_validation(self):
-        """Reject instance names that are empty, too long, or could escape their state root."""
-        for name in ('../other', '', 'a/b', 'a' * 33):
-            with self.subTest(name=name), self.assertRaisesRegex(CLIError, '--name'):
-                _instance.instance_path(name)
+    def test_prefix_validation_before_host_changes(self) -> None:
+        for prefix in ('', 'a' * 25, '-demo', '_demo', '../demo', 'demo/name', 'demo\n', '\u00e9'):
+            with self.subTest(prefix=prefix), patch.object(_instance, '_private_root') as root:
+                with self.assertRaisesRegex(CLIError, '--name-prefix'):
+                    _instance.new_name(prefix)
+                root.assert_not_called()
+        names = [_instance.new_name('a' * 24) for _ in range(2)]
+        self.assertNotEqual(*names)
+        for name in names:
+            self.assertEqual(len(name), 61)
+            self.assertEqual(str(uuid.UUID(name[-36:])), name[-36:])
+            for socket in ('serial.sock', 'rpc.sock', 'vsock.sock'):
+                self.assertLess(len((_instance.DEFAULT_STATE_DIR + '/' + name + '/' + socket).encode()), 108)
 
     def test_host_validation(self):
         """Reject unsupported hosts and invalid timeout values before lifecycle work starts."""
@@ -81,7 +90,7 @@ class InstanceTest(LinuxFilesystemTest):
             base = Path(temporary)
             base.chmod(0o700)
             with patch('azext_enclave._instance.DEFAULT_STATE_DIR', str(base)):
-                directory = _instance.instance_path('demo')
+                directory = _instance.instance_path(_instance.new_name('demo'))
             with _instance.instance_lock(directory):
                 with self.assertRaisesRegex(CLIError, 'Another command'):
                     with _instance.instance_lock(directory):
@@ -91,4 +100,4 @@ class InstanceTest(LinuxFilesystemTest):
             (base / 'link').symlink_to(target, target_is_directory=True)
             with patch('azext_enclave._instance.DEFAULT_STATE_DIR', str(base / 'link')), \
                     self.assertRaisesRegex(CLIError, 'symlink'):
-                _instance.instance_path('demo')
+                _instance.instance_path(_instance.new_name('demo'))

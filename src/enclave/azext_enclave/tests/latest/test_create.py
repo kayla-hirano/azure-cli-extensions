@@ -41,19 +41,20 @@ class CreateCommandTest(unittest.TestCase):
         self.measurements = {'snp': 'AB' * 48}
 
     def test_default_delegation(self) -> None:
-        """Map CLI defaults to packaged inputs and normalized isolation options while preserving the result shape."""
+        """Map the supplied application and default build settings while preserving the result shape."""
         image = Path('published.igvm').resolve()
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(image, self.measurements)) as build, \
                 patch.object(builder, 'validate_build_configuration',
                              wraps=builder.validate_build_configuration) as validate:
-            result = custom.create_enclave(self.cmd, 'image.igvm', workspace='work', dependency_bundle='bundle')
+            result = custom.create_enclave(
+                self.cmd, 'image.igvm', application='my-app', workspace='work', dependency_bundle='bundle')
         self.assertEqual(result, {'igvm': str(image), 'measurements': self.measurements})
         self.assertEqual(json.loads(json.dumps(result)), result)
         validate.assert_called_once_with(load_isolation(), isolation_options=None, enable_guest_debug=False)
         build.assert_called_once_with(
-            dependency_bundle=Path('bundle'), application=custom.DEFAULT_APPLICATION,
-            init_script=custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init', workspace=Path('work'),
+            dependency_bundle=Path('bundle'), application=Path('my-app'),
+            init_script=None, app_cmd_line=None, workspace=Path('work'),
             output=Path('image.igvm'), keep_intermediates=False, enable_guest_debug=False,
             isolation_options=builder.SnpBuildOptions(), logger=custom.logger, configuration=load_isolation())
 
@@ -61,7 +62,8 @@ class CreateCommandTest(unittest.TestCase):
         """Forward caller signing, init-script, and workspace choices without enabling guest debugging."""
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(Path('signed.igvm'), self.measurements)) as build:
-            custom.create_enclave(self.cmd, 'signed.igvm', workspace='work', dependency_bundle='bundle',
+            custom.create_enclave(self.cmd, 'signed.igvm', application='my-app',
+                                  workspace='work', dependency_bundle='bundle',
                                   init_script='init', signing_key='private.pem')
         self.assertEqual(build.call_args.kwargs['isolation_options'].signing_key, Path('private.pem'))
         self.assertEqual(build.call_args.kwargs['init_script'], Path('init'))
@@ -84,7 +86,7 @@ class CreateCommandTest(unittest.TestCase):
                         patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                         Path('image.igvm'), self.measurements)) as build:
                     code = cli.invoke(
-                        ['enclave', 'create', '--output-file', 'image.igvm',
+                        ['enclave', 'create', '--application', 'my-app', '--output-file', 'image.igvm',
                          '--output', 'json'] + bundle_args + flags,
                         out_file=output)
                 self.assertEqual(code, 0, str(cli.result.error))
@@ -102,7 +104,7 @@ class CreateCommandTest(unittest.TestCase):
                     warning.assert_not_called()
                 self.assertEqual(build.call_args.kwargs['dependency_bundle'],
                                  Path('bundle') if flags else packaged)
-                self.assertEqual(build.call_args.kwargs['application'], custom.DEFAULT_APPLICATION)
+                self.assertEqual(build.call_args.kwargs['application'], Path('my-app'))
 
     def test_build_errors_include_stage_and_residual_workspace(self) -> None:
         """Expose the failed build stage and any retained workspace through the CLI error."""
@@ -111,7 +113,8 @@ class CreateCommandTest(unittest.TestCase):
                 error = builder.IgvmBuildError('tool failed', stage='generate-igvm', workspace=workspace)
                 with patch.object(builder, 'build_igvm', side_effect=error):
                     with self.assertRaises(CLIError) as raised:
-                        custom.create_enclave(self.cmd, 'image.igvm', workspace='work', dependency_bundle='bundle')
+                        custom.create_enclave(
+                            self.cmd, 'image.igvm', application='my-app', workspace='work', dependency_bundle='bundle')
                 self.assertIn('generate-igvm: tool failed', str(raised.exception))
                 self.assertIs(raised.exception.__cause__, error)
                 self.assertEqual('Build workspace available at:' in str(raised.exception),
@@ -126,7 +129,7 @@ class CreateCommandTest(unittest.TestCase):
         loader.load_arguments('enclave create')
         table['enclave create'].load_arguments()
         arguments = table['enclave create'].arguments
-        required = {'output_file'}
+        required = {'output_file', 'application'}
         self.assertEqual({name for name, arg in arguments.items()
                           if arg.options.get('required') and name != 'cmd'}, required)
         self.assertEqual(arguments['output_file'].options_list, ['--output-file'])
@@ -134,9 +137,9 @@ class CreateCommandTest(unittest.TestCase):
         self.assertIsNone(arguments['workspace'].options['default'])
         self.assertIsNone(arguments['signing_key'].options['default'])
         self.assertIsNone(arguments['init_script'].options['default'])
+        self.assertIsNone(arguments['app_cmd_line'].options['default'])
         self.assertIsNone(arguments['dependency_bundle'].options['default'])
         self.assertEqual(arguments['application'].options_list, ['--application'])
-        self.assertIsNone(arguments['application'].options['default'])
         default_init = custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init'
         script = default_init.read_bytes()
         self.assertTrue(script.startswith(b'#!/bin/sh\n'))
@@ -145,8 +148,9 @@ class CreateCommandTest(unittest.TestCase):
         self.assertIn(b'exec /bin/enclave_app serve-vsock 4050\n', script)
         with patch.object(builder, 'build_igvm',
                           return_value=builder.IgvmBuildResult(Path('image.igvm'), self.measurements)) as build:
-            custom.create_enclave(self.cmd, 'image.igvm', workspace='work', dependency_bundle='bundle')
-        self.assertEqual(build.call_args.kwargs['init_script'], default_init)
+            custom.create_enclave(
+                self.cmd, 'image.igvm', application='my-app', workspace='work', dependency_bundle='bundle')
+        self.assertIsNone(build.call_args.kwargs['init_script'])
 
     def test_packaged_bundle_is_selected_when_override_is_omitted(self) -> None:
         """Select the packaged dependency archive when the caller provides no bundle override."""
@@ -156,7 +160,7 @@ class CreateCommandTest(unittest.TestCase):
             with patch.object(custom, 'DEFAULT_DEPENDENCY_BUNDLE', archive), \
                     patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                         Path('image.igvm'), self.measurements)) as build:
-                custom.create_enclave(self.cmd, 'image.igvm', workspace='work')
+                custom.create_enclave(self.cmd, 'image.igvm', application='my-app', workspace='work')
             self.assertEqual(build.call_args.kwargs['dependency_bundle'], archive)
 
     def test_missing_packaged_bundle_has_actionable_override_instructions(self) -> None:
@@ -166,7 +170,7 @@ class CreateCommandTest(unittest.TestCase):
             with patch.object(custom, 'DEFAULT_DEPENDENCY_BUNDLE', archive), \
                     patch.object(builder, 'build_igvm') as build:
                 with self.assertRaisesRegex(CLIError, 'missing.*--dependency-bundle'):
-                    custom.create_enclave(self.cmd, 'image.igvm', workspace='work')
+                    custom.create_enclave(self.cmd, 'image.igvm', application='my-app', workspace='work')
             build.assert_not_called()
 
     def test_invalid_isolation_configuration_precedes_bundle_lookup(self) -> None:
@@ -174,7 +178,7 @@ class CreateCommandTest(unittest.TestCase):
         with patch('azext_enclave._isolation.load_isolation', side_effect=ValueError('bad manifest')), \
                 patch.object(Path, 'is_file') as lookup, patch.object(builder, 'build_igvm') as build:
             with self.assertRaisesRegex(CLIError, 'Unable to create Enclave image.*bad manifest'):
-                custom.create_enclave(self.cmd, 'image.igvm')
+                custom.create_enclave(self.cmd, 'image.igvm', application='my-app')
             lookup.assert_not_called()
             build.assert_not_called()
 
@@ -194,26 +198,25 @@ class CreateCommandTest(unittest.TestCase):
                     patch.object(builder, 'build_igvm') as build:
                 self.cmd.cli_ctx.data['safe_params'] = ['--debug'] if options.get('debug') else []
                 with self.assertRaisesRegex(CLIError, message):
-                    custom.create_enclave(self.cmd, 'image.igvm', signing_key=options.get('signing_key'))
+                    custom.create_enclave(
+                        self.cmd, 'image.igvm', application='my-app', signing_key=options.get('signing_key'))
                 lookup.assert_not_called()
                 snp_options.assert_not_called()
                 warning.assert_not_called()
                 build.assert_not_called()
 
-    def test_real_packaged_inputs_and_default_selection(self) -> None:
-        """Validate the shipped application and dependency archive and select both when overrides are absent."""
+    def test_real_packaged_bundle_and_default_selection(self) -> None:
+        """Validate the shipped dependency archive and select it when no override is supplied."""
         self.assertEqual(custom.DEFAULT_DEPENDENCY_BUNDLE.name, 'dependencies.tar.gz')
         self.assertTrue(tarfile.is_tarfile(custom.DEFAULT_DEPENDENCY_BUNDLE))
-        builder._validate_application(custom.DEFAULT_APPLICATION)
         with tempfile.TemporaryDirectory() as directory:
             extracted = builder._extract_bundle(custom.DEFAULT_DEPENDENCY_BUNDLE, Path(directory) / 'bundle')
             dependencies = builder._dependencies(extracted.resolve())
             self.assertIn('igvmfilegen', dependencies)
         with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                 Path('image.igvm'), self.measurements)) as build:
-            custom.create_enclave(self.cmd, 'image.igvm', workspace='work')
+            custom.create_enclave(self.cmd, 'image.igvm', application='my-app', workspace='work')
         self.assertEqual(build.call_args.kwargs['dependency_bundle'], custom.DEFAULT_DEPENDENCY_BUNDLE)
-        self.assertEqual(build.call_args.kwargs['application'], custom.DEFAULT_APPLICATION)
 
     def test_application_override_through_cli_invocation(self) -> None:
         """Forward application and startup-script overrides through the registered CLI command."""
@@ -229,22 +232,12 @@ class CreateCommandTest(unittest.TestCase):
             self.assertEqual(build.call_args.kwargs['application'], Path('custom-app'))
             self.assertEqual(build.call_args.kwargs['init_script'], Path('custom-init'))
 
-    def test_application_override_does_not_require_packaged_application(self) -> None:
-        """Use a caller application even when the packaged application is missing."""
-        with patch.object(custom, 'DEFAULT_APPLICATION', Path('missing-packaged-app')), \
-                patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
-                    Path('image.igvm'), self.measurements)) as build:
-            custom.create_enclave(self.cmd, 'image.igvm', workspace='work', dependency_bundle='bundle',
-                                  application='custom-app')
-        self.assertEqual(build.call_args.kwargs['application'], Path('custom-app'))
-        self.assertEqual(build.call_args.kwargs['init_script'],
-                         custom.DEPENDENCIES_DIR / 'initramfs' / 'enclave-init')
-
     def test_archive_override_is_forwarded_without_requiring_packaged_bundle(self) -> None:
         """Forward an explicit dependency archive without requiring the default packaged bundle."""
         with patch.object(builder, 'build_igvm', return_value=builder.IgvmBuildResult(
                 Path('image.igvm'), self.measurements)) as build:
-            custom.create_enclave(self.cmd, 'image.igvm', workspace='work', dependency_bundle='custom.tar.gz')
+            custom.create_enclave(
+                self.cmd, 'image.igvm', application='my-app', workspace='work', dependency_bundle='custom.tar.gz')
         self.assertEqual(build.call_args.kwargs['dependency_bundle'], Path('custom.tar.gz'))
 
 
@@ -372,9 +365,10 @@ class BuildInputs:
 
     def build(self, **kwargs) -> builder.IgvmBuildResult:
         workspace = kwargs.pop('workspace', self.workspace)
+        init_script = kwargs.pop('init_script', self.init)
         return builder.build_igvm(
             dependency_bundle=self.bundle, application=self.application,
-            init_script=self.init, workspace=workspace, output=self.output, **kwargs)
+            init_script=init_script, workspace=workspace, output=self.output, **kwargs)
 
 
 class ImageBuilderTest(unittest.TestCase):
@@ -790,6 +784,50 @@ class ImageBuilderTest(unittest.TestCase):
         self.assertEqual(raised.exception.workspace.parent, self.inputs.workspace)
         self.run.assert_not_called()
 
+    def test_app_command_line_through_cli_and_packaging(self) -> None:
+        """Package the exact caller command while preserving the default startup script."""
+        command = '/bin/enclave_app worker --label "two words" && echo done'
+        original = builder.DEFAULT_INIT_SCRIPT.read_bytes()
+        expected = original.replace(
+            b'exec /bin/enclave_app serve-vsock 4050\n', b'exec ' + command.encode('utf-8') + b'\n')
+
+        def inspect(work: Path) -> None:
+            self.assertEqual((work / 'rootfs' / 'init').read_bytes(), expected)
+
+        inspection = self.inspect_stage('generate-igvm', inspect)
+        cli = create_cli(str(self.inputs.root / 'cli-config'))
+        output = io.StringIO()
+        code = cli.invoke(
+            ['enclave', 'create', '--application', str(self.inputs.application),
+             '--dependency-bundle', str(self.inputs.bundle), '--workspace', str(self.inputs.workspace),
+             '--output-file', str(self.inputs.output), '--app-cmd-line', command, '--output', 'json'],
+            out_file=output)
+        self.assertEqual(code, 0, str(cli.result.error))
+        inspection.assert_called_once()
+        self.assertEqual(json.loads(output.getvalue())['igvm'], str(self.inputs.output))
+        self.assertEqual(builder.DEFAULT_INIT_SCRIPT.read_bytes(), original)
+        self.assertEqual(list(self.inputs.workspace.iterdir()), [])
+
+    def test_app_command_line_rejects_custom_init_even_for_default_command(self) -> None:
+        """Reject conflicting startup overrides before creating build files."""
+        for command in ('/bin/enclave_app serve-vsock 4050', '/bin/enclave_app worker'):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(builder.IgvmBuildError, 'cannot be combined with --init-script'):
+                    self.inputs.build(app_cmd_line=command)
+        self.run.assert_not_called()
+        self.assertFalse(self.inputs.workspace.exists())
+        self.assertFalse(self.inputs.output.exists())
+
+    def test_app_command_line_rejects_empty_or_multiline_commands(self) -> None:
+        """Reject invalid startup commands without executing build tools."""
+        for command in ('', ' ', 'worker\0arg', 'worker\rarg', 'worker\narg'):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(builder.IgvmBuildError, '--app-cmd-line must be a nonempty string'):
+                    self.inputs.build(init_script=None, app_cmd_line=command)
+        self.run.assert_not_called()
+        self.assertFalse(self.inputs.workspace.exists())
+        self.assertFalse(self.inputs.output.exists())
+
     def test_composed_rootfs_and_normalized_metadata(self) -> None:
         """Compose the requested application and init script while removing legacy files and normalizing metadata."""
         def inspect(work):
@@ -1200,8 +1238,8 @@ class ImageBuilderTest(unittest.TestCase):
                     self.inputs.build()
         self.run.assert_not_called()
 
-    def test_application_override_validation_never_falls_back_to_packaged_app(self) -> None:
-        """Report invalid caller applications without silently substituting the packaged executable."""
+    def test_invalid_application_is_reported_through_cli(self) -> None:
+        """Report invalid or missing caller applications without running build tools."""
         cmd = SimpleNamespace(cli_ctx=SimpleNamespace(data={'safe_params': []}))
         self.inputs.application.write_bytes(b'not an executable')
         for application in (self.inputs.application, self.inputs.root / 'missing-app'):
@@ -1239,6 +1277,7 @@ class ImageBuilderTest(unittest.TestCase):
             with self.assertRaisesRegex(CLIError, 'validate: IGVM packaging requires Linux'):
                 cmd = SimpleNamespace(cli_ctx=SimpleNamespace(data={'safe_params': []}))
                 custom.create_enclave(cmd, str(self.inputs.output), workspace=str(self.inputs.workspace),
+                                      application=str(self.inputs.application),
                                       dependency_bundle=str(self.inputs.bundle), init_script=str(self.inputs.init))
         self.run.assert_not_called()
 
